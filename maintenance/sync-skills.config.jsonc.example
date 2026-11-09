@@ -1,0 +1,56 @@
+{
+  // sync-skills 配置示例：复制为 sync-skills.config.jsonc（推荐）或
+  // sync-skills.config.json 后修改。脚本优先读取 .jsonc；真实配置不入库。
+  // 每个 source 会生成一条命令：
+  //   npx skills add <path> --skill <name> ... -a <agent> ... [-g] -y
+  //
+  // 路径支持 %USERPROFILE% 等环境变量；以 http(s):// 或 git@ 开头视为远程源。
+
+  // 项目或源未单独指定 agents 时使用的默认 Agent 列表
+  "agents": ["claude-code"],
+
+  // 单条命令默认超时（秒），源可用 timeoutSeconds 覆盖
+  "timeoutSeconds": 500,
+  // 失败重试次数（不含首次）
+  "retries": 2,
+  // 失败重试间隔（秒）
+  "retryDelaySeconds": 30,
+  // 上一条命令结束到下一条开始之间的等待（秒）
+  "taskDelaySeconds": 5,
+
+  // 项目清单：
+  //   "global": true → 装到用户目录（~/.claude/skills、~/.agents/skills 等）
+  //   "cwd": "..."   → 装到指定项目目录；二者取其一
+  "projects": {
+    "global": {
+      "global": true,
+      "sources": [
+        {
+          // 本地自建 skill 目录
+          "path": "%USERPROFILE%\\path\\to\\skills",
+          "skills": ["example-skill"]
+        },
+        {
+          // 远程仓库，未写 agents 时使用顶层默认
+          "path": "https://github.com/vercel-labs/skills",
+          "skills": ["find-skills"]
+        }
+      ]
+    },
+
+    "example-project": {
+      // 项目目录不存在时预检直接报错并跳过
+      "cwd": "%USERPROFILE%\\path\\to\\project",
+      // 项目级 agents 覆盖顶层默认
+      "agents": ["claude-code"],
+      "sources": [
+        {
+          "path": "https://github.com/anthropics/skills",
+          "skills": ["docx", "pdf", "xlsx"],
+          // 源级设置优先于顶层的同名设置
+          "timeoutSeconds": 120
+        }
+      ]
+    }
+  }
+}

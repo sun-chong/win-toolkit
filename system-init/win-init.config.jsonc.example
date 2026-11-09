@@ -1,0 +1,58 @@
+{
+  // ==========================================================================
+  // win-init 安装清单（模板）
+  // --------------------------------------------------------------------------
+  // 复制为同目录的 win-init.config.jsonc 后使用；真实配置不入库。
+  //
+  // 每段按数组顺序执行；段内先 winget，再 commands。
+  // 第一阶段结束后会暂停，等你在 Clash Verge 中配好代理再继续。
+  // "critical": true 的段安装失败会立即中止；其余段失败只记录并继续。
+  // 注释掉一项即可停用。
+  //
+  // 环境变量、PATH 等难以写进清单的本机设置不在本文件中，
+  // 由同目录 win-init.local.ps1 处理（模板见 win-init.local.ps1.example）。
+  //
+  // 字段写法：
+  //   winget    只写包 ID
+  //   commands   每项是一段 PowerShell 代码，由子进程执行；失败记录后继续
+  //             远程安装脚本直接写：irm https://... | iex
+  // ==========================================================================
+  "stages": [
+    {
+      "title": "代理工具",
+      "critical": true,
+      "winget": [
+        "ClashVergeRev.ClashVergeRev"
+      ]
+    },
+    {
+      "title": "关键运行时",
+      "critical": true,
+      "winget": [
+        "OpenJS.NodeJS.LTS",
+        "Python.Python.3.14"
+      ]
+    },
+    {
+      "title": "常用软件",
+      "winget": [
+        "Microsoft.VisualStudioCode",
+        "7zip.7zip",
+
+        // 按需添加：每行一个 winget 包 ID，注释掉即可停用
+        // "Vendor.App",
+        // "Vendor.AnotherApp"
+      ],
+      "commands": [
+        "irm https://bun.sh/install.ps1 | iex",
+        "irm https://astral.sh/uv/install.ps1 | iex",
+      ]
+    },
+    {
+      "title": "基础包",
+      "commands": [
+        "uv pip install --system mcp fastapi uvicorn httpx",
+      ]
+    }
+  ]
+}

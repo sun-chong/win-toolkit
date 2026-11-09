@@ -1,0 +1,49 @@
+{
+  // ==========================================================================
+  // sync-agents.ps1 配置模板
+  // --------------------------------------------------------------------------
+  // 用法：复制本文件为同目录的 sync-agents.config.jsonc，再按本机需求修改。
+  //       sync-agents.config.jsonc 不入库，每台机器维护自己的分发清单。
+  //
+  // 脚本同时支持 sync-agents.config.jsonc 与 sync-agents.config.json，
+  // 两者都存在时优先 .jsonc。
+  //
+  // 格式为 JSONC：允许 // 注释和尾随逗号（PowerShell 7 原生支持）。
+  // ==========================================================================
+
+  // Subagent 定义文件所在目录。
+  //   - 相对路径按用户主目录解析
+  //   - 也可以写带 %USERPROFILE% 的绝对路径
+  // 省略本字段时使用公共配置的 SubagentsRoot。
+  "subagentsRoot": "path\\to\\subagents",
+
+  // 分发清单：每项把一个源文件复制到多个目标目录。
+  "distributions": [
+    {
+      // 终端里显示的条目名，可省略（省略时显示 source）。
+      "name": "全局 Subagent",
+
+      // 相对 subagentsRoot 解析；也可写绝对路径。
+      "source": "my-agent.md",
+
+      // 目标目录，可写多个。
+      //   - 支持 %USERPROFILE% / %APPDATA% 等环境变量
+      //   - 相对路径按用户主目录解析
+      //   - 目录不存在时自动创建
+      "destinations": [
+        "%USERPROFILE%\\.claude\\agents",
+        "%USERPROFILE%\\.pi\\agent\\agents"
+      ]
+    },
+
+    {
+      // 项目级分发示例：同一个源文件复制到某个项目的 Agent 目录。
+      "name": "项目级 Subagent",
+      "source": "my-project-agent.md",
+      "destinations": [
+        "%USERPROFILE%\\projects\\my-project\\.claude\\agents",
+        "%USERPROFILE%\\projects\\my-project\\.pi\\agents"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  // ph 白名单配置示例：复制为 ph.config.jsonc（推荐）或 ph.config.json 后修改。
+  // 脚本优先读取 .jsonc；真实配置不入库。
+  //
+  // 匹配规则（与 Claude Code permissions 语法一致）：
+  //   末尾 ":*"（或 " *"）→ 前缀匹配，如 "git:*" 保留 git 及所有 git 开头的命令
+  //   其他                → 精确匹配，如 "ph" 仅保留 ph 本身
+  //
+  // 注意：ph 默认流程写入白名单时会重写文件，注释不会保留。
+  "whitelist": [
+    "ls",
+    "pwd",
+    "git:*",
+    "code .",
+    "ph"
+  ]
+}

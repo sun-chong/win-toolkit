@@ -1,0 +1,73 @@
+#Requires -Version 7.0
+
+<#
+.SYNOPSIS
+    win-init 本机自定义步骤
+
+.DESCRIPTION
+    由 win-init.main.ps1 在主流程结束后自动执行。
+    日常只需要修改文件最后的「本机设置」，每项一行。
+
+    值可以写 %ProgramFiles%、%LocalAppData% 这类变量，也可以写绝对路径；
+    绝对路径会自动转换成变量形式再写入注册表。
+
+    本文件不入库；模板见同目录 win-init.local.ps1.example。
+
+.NOTES
+    Author: SUNC
+    Version: 3.0.0
+#>
+
+$ErrorActionPreference = 'Stop'
+
+# ==========================================================================
+# 公共库与管理员权限（不需要修改）
+# ==========================================================================
+
+$toolkitRoot = $PSScriptRoot
+while ($toolkitRoot -and -not (Test-Path -LiteralPath (Join-Path $toolkitRoot 'lib\Toolkit.psd1'))) {
+    $toolkitRoot = Split-Path -Parent $toolkitRoot
+}
+if (-not $toolkitRoot) {
+    Write-Host '错误：未找到公共库 lib/Toolkit.psd1；请确认脚本位于仓库内' -ForegroundColor Red
+    exit 1
+}
+Import-Module (Join-Path $toolkitRoot 'lib\Toolkit.psd1') -Force
+
+# 非管理员时通过 UAC 重新启动自己
+if (-not (Test-ToolkitAdministrator)) {
+    try {
+        $process = Invoke-ToolkitElevation -ScriptPath $PSCommandPath
+    }
+    catch {
+        Write-Host '错误：本脚本需要管理员权限，已取消。' -ForegroundColor Red
+        exit 1
+    }
+    exit $process.ExitCode
+}
+
+# ==========================================================================
+# 本机设置：改这里，每项一行
+# ==========================================================================
+
+# 安装目录探测；找不到时返回 $null，对应的变量会自动跳过
+$jdkHome = Get-ToolkitJdkHome
+
+# 系统变量（需要管理员）
+Set-ToolkitEnvironmentVariable -Name 'JAVA_HOME' -Value $jdkHome -Scope Machine
+
+# 用户变量
+Set-ToolkitEnvironmentVariable -Name 'EDITOR'            -Value 'code --wait' -Scope User
+
+# 按需添加其他变量，例如：
+# $sqlclHome = Get-ToolkitSqlclHome
+# Set-ToolkitEnvironmentVariable -Name 'OracleSQLcl' -Value $sqlclHome -Scope User
+
+# PATH 追加项；变量或目录不存在时自动跳过，重复的不会重复追加
+Add-ToolkitEnvironmentPathEntry -Entry '%JAVA_HOME%\bin' -Scope Machine
+
+# 按需添加其他 PATH 项，例如：
+# Add-ToolkitEnvironmentPathEntry -Entry '%OracleSQLcl%' -Scope User
+
+Send-ToolkitEnvironmentChange
+Write-Host '本机环境变量已写入；新开的终端生效'

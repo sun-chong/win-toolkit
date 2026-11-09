@@ -1,0 +1,23 @@
+{
+  // ghup 配置示例：复制为 ghup.config.jsonc（推荐）或 ghup.config.json 后修改。
+  // 脚本优先读取 .jsonc；真实配置不入库。
+  //
+  // 每个来源字段：
+  //   type    github（默认，可省略）| claude
+  //   alias   唯一短名，用于状态文件与展示
+  //   primary "Y" 主要来源（默认检查）/ "N" 次要来源（仅 -a 检查）
+  //   name    github 类型的仓库名 owner/repo
+  //   url     claude 类型的 changelog 页面地址
+  "repositories": [
+    {
+      "name": "anthropics/claude-code",
+      "alias": "claude-code",
+      "primary": "Y"
+    },
+    {
+      "name": "example-org/example-repo",
+      "alias": "example",
+      "primary": "N"
+    }
+  ]
+}

@@ -1,0 +1,156 @@
+# 项目级私有 Agent 规则
+/CLAUDE.local.md
+/AGENTS.override.md
+**/CLAUDE.local.md
+**/AGENTS.override.md
+
+# 工具真实配置不入库，模板见同目录 *.config.jsonc.example
+**/*.config.json
+**/*.config.jsonc
+
+# win-init 本机自定义步骤不入库，模板见同目录 win-init.local.ps1.example
+/system-init/win-init.local.ps1
+
+# Agent Skills 分发日志与项目级安装产物
+/logs/
+.agents/*
+!.agents/skills/
+
+/.claude/*
+!.claude/settings.json
+!.claude/CLAUDE.md
+!.claude/hooks/
+!.claude/rules/
+/.superpowers/
+/.opencode/
+/.codex/
+/.pi/
+/.workbuddy/
+/.omo/
+
+.archive/
+/docs/
+/inputs/
+/outputs/
+skills-lock.json
+
+# 凭据、环境配置与私钥
+.env
+.env.*
+*.env
+.env.local
+.env.*.local
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 草稿文件与笔记
+/drafts/
+/notes/
+/scratch/
+/.scratch/
+.notes/
+TODO.md
+PERSONAL_NOTES.md
+
+# 缓存和锁文件
+.cache/
+*.lock
+
+# 测试文件
+test_output/
+temp_files/
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Icon
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# 编辑器与 IDE 文件
+# VSCode
+.vscode/
+.spec-workflow/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# JetBrains IDEs
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Temporary Files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~.nib
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+.npm
+.eslintcache
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
