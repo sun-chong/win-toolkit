@@ -19,29 +19,14 @@
 | `config/` | 跨脚本机器配置 `toolkit.config.jsonc`（不入库，模板为 `.example`） |
 | `docs/` | 本地设计与 Agent 文档，不入库；`docs/agents/` 供本地 Agent 参考 |
 
-## 新增脚本（强制约定）
+## 脚本编写约定（新增与修改均适用）
 
-1. **定归属**：一次性/交互式工具放 `cli-tools/`；周期性维护放 `maintenance/`；新机初始化放 `system-init/`。
-2. **先检索公共组件**：运行 `util lib`；命中就直接 `Import-Module` 使用，不重复造轮子。通用逻辑按「公共组件」沉淀。
-3. **写文件头**：中文 `.SYNOPSIS` / `.DESCRIPTION` / `.PARAMETER` / `.EXAMPLE` / `.NOTES`；`.NOTES` 固定 `Author: SUNC`、`Version: x.y.z`。`.SYNOPSIS` 缺失或格式不符会让 `util` 清单简介空白。
-4. **加公共库引导**：放在 `param()` 之后（模板见下）。
-5. **统一帮助**：开关为 `[Alias("h")] [switch]$Help`；新工具用 `Show-ToolkitHelp`；仍以 Comment-Based Help 描述帮助的脚本，`-h` 调 `Show-ToolkitScriptHelp`；禁止硬编码帮助版式。
-6. **配置分层**：跨脚本值走 `Get-ToolkitConfig`；工具专属配置与运行时状态按「配置与路径」处理。
-7. **中文与依赖**：面向用户的输出与代码注释用中文；外部依赖优先用 `Test-ExternalCommand` 检测，缺失时中文提示并 `exit 1`，不要静默失败。
-
-### 公共库引导模板
-
-```powershell
-$toolkitRoot = $PSScriptRoot
-while ($toolkitRoot -and -not (Test-Path -LiteralPath (Join-Path $toolkitRoot 'lib\Toolkit.psd1'))) {
-    $toolkitRoot = Split-Path -Parent $toolkitRoot
-}
-if (-not $toolkitRoot) {
-    Write-Host '错误：未找到公共库 lib/Toolkit.psd1；请确认脚本位于仓库内' -ForegroundColor Red
-    exit 1
-}
-Import-Module (Join-Path $toolkitRoot 'lib\Toolkit.psd1') -Force
-```
+1. **定归属**：一次性/交互式工具放 `cli-tools/`；周期性维护放 `maintenance/`；新机初始化放 `system-init/`。需要分类时在 `cli-tools/` 下建子目录，`util` 显示为 `分类/工具名`。
+2. **写文件头**：中文 `.SYNOPSIS` / `.DESCRIPTION` / `.PARAMETER` / `.EXAMPLE` / `.NOTES`；`.NOTES` 固定 `Author: SUNC`、`Version: x.y.z`。修改脚本时同步维护对应字段。`.SYNOPSIS` 缺失或格式不符会让 `util` 清单简介空白。
+3. **统一帮助**：开关为 `[Alias("h")] [switch]$Help`；新工具用 `Show-ToolkitHelp`；仍以 Comment-Based Help 描述帮助的脚本，`-h` 调 `Show-ToolkitScriptHelp`；禁止硬编码帮助版式。
+4. **配置分层**：跨脚本值走 `Get-ToolkitConfig`；工具专属配置与运行时状态按「配置与路径」处理。
+5. **中文与依赖**：面向用户的输出与代码注释用中文；外部依赖优先用 `Test-ExternalCommand` 检测，缺失时中文提示并 `exit 1`，不要静默失败。
+6. **先检索公共组件**：运行 `util lib`；命中就直接 `Import-Module` 使用，不重复造轮子。修改、编辑脚本时发现可下沉的通用逻辑，按「公共组件」沉淀。
 
 ## 公共组件（lib/）
 
