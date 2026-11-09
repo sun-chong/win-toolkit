@@ -353,7 +353,7 @@ foreach ($stage in @($config.stages)) {
     Invoke-UpdateStage -Stage $stage -StageTimeoutSeconds $configTimeout
 }
 
-# Temp 清理固化在脚本中：标题写死，固定排在所有配置阶段之后
+# Temp 清理固化在脚本中，固定排在所有配置阶段之后
 Write-Stage '开始清理 Temp 目录下超过 7 天的临时文件'
 Invoke-Update {
     $options = @{
@@ -363,8 +363,6 @@ Invoke-Update {
         ErrorAction = 'SilentlyContinue'
     }
     $cutoff = (Get-Date).AddDays(-7)
-
-    # 一次递归枚举后按类型分别删除，避免同一棵树被 -File / -Directory 扫描两遍
     $stale = @(Get-ChildItem @options | Where-Object { $_.LastWriteTime -lt $cutoff })
     $stale | Where-Object { -not $_.PSIsContainer } |
         Remove-Item -Force -ErrorAction SilentlyContinue
