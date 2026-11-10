@@ -14,7 +14,10 @@
     保留的采样点数，默认 60。
 
 .PARAMETER Full
-    占满整个终端窗口；短参数 -f。默认只使用居中的 100×30 区域。
+    占满整个终端窗口；短参数 -f。默认只使用最多 100×30 的区域。
+
+.PARAMETER Simple
+    只打印一次文字快照后退出；短参数 -s。
 
 .PARAMETER Help
     查看帮助。
@@ -26,6 +29,10 @@
 .EXAMPLE
     perf -f
     以全屏模式启动。
+
+.EXAMPLE
+    perf -s
+    打印一次性能快照后退出。
 
 .EXAMPLE
     perf -h
@@ -41,6 +48,8 @@ param(
     [switch]$Help,
     [Alias("f")]
     [switch]$Full,
+    [Alias("s")]
+    [switch]$Simple,
     [double]$Interval = 1.0,
     [int]$History = 60
 )
@@ -58,17 +67,19 @@ Import-Module (Join-Path $toolkitRoot 'lib\Toolkit.psd1') -Force
 
 $helpSections = @(
     @{ Title = '使用方式'; Lines = @(
-        'perf               启动实时性能面板（默认 100×30 区域）'
+        'perf               启动实时性能面板（默认最多 100×30）'
         'perf -f            以全屏模式启动'
+        'perf -s            仅打印一次文字快照'
         'perf -h            查看帮助'
         'f                  运行中切换全屏 / 默认 100×30'
         'q / Esc / Ctrl+C   退出并打印性能快照'
-        '窗口最小 60×10；默认视口最多 100×30'
+        '窗口最小 60×11；默认视口最多 100×30'
     ) }
     @{ Title = '参数'; Lines = @(
         '-Interval <秒>     采样与刷新间隔，默认 1.0，最小 0.5'
         '-History <点数>    保留的采样点数，默认 60'
-        '-Full, -f          占满终端窗口；默认 100×30 区域'
+        '-Full, -f          占满终端窗口；默认最多 100×30'
+        '-Simple, -s        打印一次文字快照后退出'
     ) }
 )
 
@@ -76,6 +87,7 @@ $script:PerfPdhSource = @'
 using System;
 using System.Runtime.InteropServices;
 
+// PDH 采样器：打开一次查询，每帧 Collect + ReadAll。
 public class PdhSampler : IDisposable {
     [StructLayout(LayoutKind.Sequential)] public struct FmtVal { public uint CStatus; public double Value; }
     [StructLayout(LayoutKind.Sequential)] public struct FmtItem { public IntPtr Name; public FmtVal Val; }
@@ -107,6 +119,7 @@ public class PdhSampler : IDisposable {
     public bool GpuOk { get; private set; }
     public double GpuPct { get; private set; }
 
+    // 打开查询并注册全部计数器；某计数器添加失败时对应 Ok=false。
     public void Init() {
         int rc = PdhOpenQuery(null, IntPtr.Zero, out query);
         if (rc != 0) throw new Exception("PdhOpenQuery failed: " + rc);
@@ -123,10 +136,12 @@ public class PdhSampler : IDisposable {
         GpuOk = PdhAddEnglishCounter(query, @"\GPU Engine(*)\Utilization Percentage", IntPtr.Zero, out hGpu) == 0;
     }
 
+    // 采集一次原始样本；返回 PDH 错误码，0 表示成功。
     public int Collect() {
         return PdhCollectQueryData(query);
     }
 
+    // 读取本帧格式化值并换算单位；读取无效的项会清掉对应 Ok。
     public void ReadAll(double baseMhz) {
         double v = 0, perf = 0, idle = 0, read = 0, write = 0;
         bool recvOk, sendOk, gpuOk;
@@ -156,6 +171,7 @@ public class PdhSampler : IDisposable {
         GpuOk = gpuOk;
     }
 
+    // 读取单个计数器；状态 0/1 视为有效。
     bool ReadSingle(IntPtr counter, out double value) {
         value = 0;
         if (counter == IntPtr.Zero) return false;
@@ -166,6 +182,7 @@ public class PdhSampler : IDisposable {
         return true;
     }
 
+    // 读取通配符计数器的全部实例并求和；支持跳过 Loopback。
     double ArraySum(IntPtr counter, bool skipLoopback, out bool ok) {
         ok = false;
         if (counter == IntPtr.Zero) return 0;
@@ -194,16 +211,19 @@ public class PdhSampler : IDisposable {
         }
     }
 
+    // 限制百分比到 0–100。
     static double ClampPercent(double value) {
         return value < 0 ? 0 : (value > 100 ? 100 : value);
     }
 
+    // 关闭 PDH 查询。
     public void Dispose() {
         if (query != IntPtr.Zero) { PdhCloseQuery(query); query = IntPtr.Zero; }
     }
 }
 '@
 
+# 创建（必要时编译）PDH 采样器实例。
 function New-PerfPdhSampler {
     if (-not ('PdhSampler' -as [type])) {
         Add-Type -TypeDefinition $script:PerfPdhSource -ErrorAction Stop
@@ -211,6 +231,7 @@ function New-PerfPdhSampler {
     return [PdhSampler]::new()
 }
 
+# 读取 CPU、内存、GPU 静态信息；只在启动时调用一次。
 function Get-PerfStaticInfo {
     $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
     $cs = Get-CimInstance Win32_ComputerSystem
@@ -234,6 +255,7 @@ function Get-PerfStaticInfo {
     }
 }
 
+# 创建固定容量的指标历史缓冲。
 function New-PerfHistory {
     param([int]$Capacity = 60)
     return [pscustomobject]@{
@@ -244,6 +266,7 @@ function New-PerfHistory {
     }
 }
 
+# 追加采样值，维护有效标志与连续失败计数。
 function Add-PerfHistorySample {
     param(
         $History,
@@ -264,6 +287,7 @@ function Add-PerfHistorySample {
     }
 }
 
+# 把历史重采样到图表列宽：缩小取区间最大值，放大按比例复制。
 function Get-PerfResampled {
     param(
         $History,
@@ -301,6 +325,7 @@ function Get-PerfResampled {
     return @($result)
 }
 
+# 计算网络图表的自适应满格值（1/2/5×10^n）。
 function Get-PerfScaleMax {
     param($History)
     $max = 0.0
@@ -319,6 +344,7 @@ function Get-PerfScaleMax {
     return [double](10 * $pow)
 }
 
+# 把 KB/s 格式化为紧凑的 KB/s、MB/s 或 GB/s。
 function Format-PerfRate {
     param([double]$KBs)
     if ($KBs -ge 1048576) { return ('{0:N0} GB/s' -f ($KBs / 1048576)) }
@@ -326,6 +352,7 @@ function Format-PerfRate {
     return ('{0:N0} KB/s' -f $KBs)
 }
 
+# 把指标色与深色背景混合，得到面积填充色。
 function Get-PerfMixedHex {
     param(
         [string]$HexColor,
@@ -343,6 +370,7 @@ function Get-PerfMixedHex {
     return ('#{0:X2}{1:X2}{2:X2}' -f $mr, $mg, $mb)
 }
 
+# 用 ANSI 24-bit 前景色包裹文本。
 function Format-PerfAnsi {
     param(
         [string]$Text,
@@ -356,6 +384,29 @@ function Format-PerfAnsi {
     return ("`e[38;2;$r;$g;${b}m$Text`e[0m")
 }
 
+# 线性插值，把每个字符列扩展为两个点阵子列。
+function Expand-PerfValues {
+    param([object[]]$Values)
+    $expanded = [System.Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt $Values.Count; $i++) {
+        $left = $Values[$i]
+        $right = if ($i -lt ($Values.Count - 1)) { $Values[$i + 1] } else { $left }
+        if ($null -eq $left -and $null -eq $right) {
+            $expanded.Add($null)
+            $expanded.Add($null)
+            continue
+        }
+        if ($null -eq $left) { $left = $right }
+        if ($null -eq $right) { $right = $left }
+        $l = [double]$left
+        $r = [double]$right
+        $expanded.Add($l)
+        $expanded.Add(($l + $r) / 2.0)
+    }
+    return @($expanded)
+}
+
+# 用 Braille 2×4 点阵渲染一张面积图。
 function Get-PerfChartLines {
     param(
         [object[]]$Values,
@@ -363,46 +414,46 @@ function Get-PerfChartLines {
         [string]$HexColor,
         [bool]$ShowGrid = $false
     )
-    $levels = $Rows * 2
+    $subValues = @(Expand-PerfValues -Values $Values)
+    $dotRows = $Rows * 4
     $mixed = Get-PerfMixedHex -HexColor $HexColor -Percent 62
     $gridRows = @(
         [int][math]::Round($Rows * 0.25)
         [int][math]::Round($Rows * 0.5)
         [int][math]::Round($Rows * 0.75)
     )
+    $bitLookup = @(0x01, 0x08, 0x02, 0x10, 0x04, 0x20, 0x40, 0x80)
     $lines = [System.Collections.Generic.List[string]]::new()
     for ($row = 0; $row -lt $Rows; $row++) {
         $sb = [System.Text.StringBuilder]::new()
-        $top = 2 * $row
-        $bot = $top + 1
         for ($x = 0; $x -lt $Values.Count; $x++) {
-            $value = $Values[$x]
-            if ($null -eq $value) {
-                if ($ShowGrid -and $gridRows -contains $row) {
-                    [void]$sb.Append((Format-PerfAnsi -Text '─' -HexColor '#33333A'))
-                } else {
-                    [void]$sb.Append(' ')
+            $bits = 0
+            $edge = $false
+            for ($subCol = 0; $subCol -lt 2; $subCol++) {
+                $value = $subValues[$x * 2 + $subCol]
+                if ($null -eq $value) { continue }
+                $clamped = [math]::Max(0, [math]::Min(100, [double]$value))
+                $fill = [int][math]::Round($clamped / 100 * $dotRows)
+                if ($fill -le 0) { continue }
+                $topPixel = $dotRows - $fill
+                for ($subRow = 0; $subRow -lt 4; $subRow++) {
+                    $pixel = $row * 4 + $subRow
+                    if ($pixel -ge $topPixel) {
+                        $bits = $bits -bor $bitLookup[$subRow * 2 + $subCol]
+                        if ($pixel -eq $topPixel) { $edge = $true }
+                    }
                 }
-                continue
             }
-            $clamped = [math]::Max(0, [math]::Min(100, [double]$value))
-            $fill = [int][math]::Round($clamped / 100 * $levels)
-            $topFilled = $top -ge ($levels - $fill)
-            $botFilled = $bot -ge ($levels - $fill)
-            if ($topFilled -and $botFilled) {
-                $edge = ($top -eq ($levels - $fill)) -or ($bot -eq ($levels - $fill))
-                $color = if ($edge) { $HexColor } else { $mixed }
-                [void]$sb.Append((Format-PerfAnsi -Text '█' -HexColor $color))
-            } elseif ($topFilled) {
-                [void]$sb.Append((Format-PerfAnsi -Text '▀' -HexColor $HexColor))
-            } elseif ($botFilled) {
-                [void]$sb.Append((Format-PerfAnsi -Text '▄' -HexColor $HexColor))
-            } else {
+            if ($bits -eq 0) {
                 if ($ShowGrid -and $gridRows -contains $row) {
                     [void]$sb.Append((Format-PerfAnsi -Text '─' -HexColor '#33333A'))
                 } else {
                     [void]$sb.Append(' ')
                 }
+            } else {
+                $ch = [char](0x2800 + $bits)
+                $color = if ($edge) { $HexColor } else { $mixed }
+                [void]$sb.Append((Format-PerfAnsi -Text ([string]$ch) -HexColor $color))
             }
         }
         $lines.Add($sb.ToString())
@@ -410,6 +461,7 @@ function Get-PerfChartLines {
     return @($lines)
 }
 
+# 按终端显示宽度补齐或截断文本。
 function Pad-PerfWidth {
     param(
         [string]$Text,
@@ -430,6 +482,7 @@ function Pad-PerfWidth {
     return $sb.ToString()
 }
 
+# 生成大卡左侧的 Y 轴刻度行。
 function Get-PerfYAxisLines {
     param([int]$Rows)
     $labels = @{}
@@ -446,6 +499,7 @@ function Get-PerfYAxisLines {
     return @($lines)
 }
 
+# 生成卡片标题行（色条、名称、数值、副信息）。
 function Get-PerfCardTitle {
     param(
         [string]$Name,
@@ -472,6 +526,7 @@ function Get-PerfCardTitle {
     return "$bar $nameColored" + (' ' * $pad) + $right
 }
 
+# 计算默认/全屏视口的尺寸、偏移与最小限制。
 function Get-PerfViewSize {
     param(
         [int]$WindowWidth,
@@ -485,7 +540,7 @@ function Get-PerfViewSize {
             OffsetX   = 0
             OffsetY   = 0
             MinWidth  = 60
-            MinHeight = 10
+            MinHeight = 11
         }
     }
     $width = [math]::Min(100, $WindowWidth)
@@ -496,10 +551,11 @@ function Get-PerfViewSize {
         OffsetX   = 0
         OffsetY   = 0
         MinWidth  = 60
-        MinHeight = 10
+        MinHeight = 11
     }
 }
 
+# 计算 C 版网格的卡片宽高与图表行数。
 function Get-PerfLayout {
     param(
         [int]$Width,
@@ -508,7 +564,7 @@ function Get-PerfLayout {
     $gap = 6
     $small = [int][math]::Floor(($Width - 2 * $gap) / 3)
     $cpu = $Width - $gap - $small
-    $chartRows = $Height - 8
+    $chartRows = $Height - 9
     $topRows = [int][math]::Floor($chartRows / 2) + 1
     if ($topRows -gt ($chartRows - 1)) { $topRows = [math]::Max(1, $chartRows - 1) }
     $bottomRows = $chartRows - $topRows
@@ -522,6 +578,7 @@ function Get-PerfLayout {
     }
 }
 
+# 渲染一帧完整的性能面板字符串。
 function Render-PerfFrame {
     param(
         $Snapshot,
@@ -595,11 +652,13 @@ function Render-PerfFrame {
     for ($r = 0; $r -lt $Layout.BottomRows; $r++) {
         $lines.Add($diskChart[$r] + $divider + $netChart[$r] + $divider + $gpuChart[$r])
     }
+    $lines.Add('')
     $lines.Add('q 退出 · Ctrl+C 退出 · f 全屏')
 
     return ($lines -join "`n")
 }
 
+# 生成退出快照的五条指标行（带颜色）。
 function Get-PerfExitSnapshotLines {
     param(
         $Snapshot,
@@ -641,6 +700,7 @@ function Get-PerfExitSnapshotLines {
     return @($rows)
 }
 
+# 构造所有指标无效的快照，供采样失败帧使用。
 function New-PerfFailedSnapshot {
     param($Static)
     return [pscustomobject]@{
@@ -665,6 +725,7 @@ function New-PerfFailedSnapshot {
     }
 }
 
+# 把文本在指定宽度内居中。
 function Get-PerfCenteredLine {
     param(
         [string]$Text,
@@ -674,6 +735,7 @@ function Get-PerfCenteredLine {
     return (' ' * $pad) + $Text
 }
 
+# 把采样器读数换算成面板快照对象。
 function Get-PerfSnapshot {
     param(
         $Sampler,
@@ -704,6 +766,7 @@ function Get-PerfSnapshot {
     }
 }
 
+# 检查是否为支持 VT 的交互式终端。
 function Test-PerfConsoleEnvironment {
     try {
         if ([Console]::IsOutputRedirected -or [Console]::IsErrorRedirected -or [Console]::IsInputRedirected) { return $false }
@@ -717,14 +780,17 @@ function Test-PerfConsoleEnvironment {
     }
 }
 
+# 进入备用屏并隐藏光标。
 function Enter-PerfAltScreen {
     [Console]::Out.Write("`e[?1049h`e[?25l")
 }
 
+# 恢复光标与主屏幕。
 function Exit-PerfAltScreen {
     [Console]::Out.Write("`e[?25h`e[?1049l")
 }
 
+# 生成退出快照的完整输出行（标题 + 指标）。
 function Get-PerfExitSnapshotDisplayLines {
     param(
         $Snapshot,
@@ -739,6 +805,7 @@ function Get-PerfExitSnapshotDisplayLines {
     return @($lines)
 }
 
+# 在主屏打印退出快照。
 function Write-PerfExitSnapshot {
     param(
         $Snapshot,
@@ -751,11 +818,42 @@ function Write-PerfExitSnapshot {
     }
 }
 
+# -s 简单模式：采样一次并打印快照后退出。
+function Invoke-PerfSimple {
+    param([double]$Interval = 1.0)
+    $static = $null
+    $sampler = $null
+    $snapshot = $null
+    $errorMessage = $null
+    try {
+        $static = Get-PerfStaticInfo
+        $sampler = New-PerfPdhSampler
+        $sampler.Init()
+        [void]$sampler.Collect()
+        Start-Sleep -Milliseconds ([math]::Max(1000, [int]($Interval * 1000)))
+        $collectRc = $sampler.Collect()
+        if ($collectRc -ne 0) { throw "采样失败（代码 $collectRc）" }
+        $sampler.ReadAll($static.BaseMhz)
+        $snapshot = Get-PerfSnapshot -Sampler $sampler -Static $static
+    } catch {
+        $errorMessage = "perf 简单模式失败：$($_.Exception.Message)"
+    } finally {
+        if ($sampler) { $sampler.Dispose() }
+    }
+    if ($errorMessage) {
+        Write-ToolkitMessage -Kind Error -Text $errorMessage
+        exit 1
+    }
+    Write-PerfExitSnapshot -Snapshot $snapshot -Static $static -Now (Get-Date)
+}
+
+# 参数校验、模式分发与 TUI 主循环。
 function Invoke-PerfMain {
     param(
         [double]$Interval = 1.0,
         [int]$History = 60,
         [switch]$Full,
+        [switch]$Simple,
         [switch]$Help
     )
     if ($Help) {
@@ -769,6 +867,10 @@ function Invoke-PerfMain {
     if ($History -lt 1) {
         Write-ToolkitMessage -Kind Error -Text '历史点数至少为 1'
         exit 1
+    }
+    if ($Simple) {
+        Invoke-PerfSimple -Interval $Interval
+        return
     }
     if (-not (Test-PerfConsoleEnvironment)) {
         Write-ToolkitMessage -Kind Error -Text 'perf 需要在支持 ANSI 的交互式终端中运行'
@@ -896,5 +998,5 @@ function Invoke-PerfMain {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-PerfMain -Interval $Interval -History $History -Full:$Full -Help:$Help
+    Invoke-PerfMain -Interval $Interval -History $History -Full:$Full -Simple:$Simple -Help:$Help
 }
