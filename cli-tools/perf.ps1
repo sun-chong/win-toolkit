@@ -13,6 +13,9 @@
 .PARAMETER History
     保留的采样点数，默认 60。
 
+.PARAMETER Full
+    占满整个终端窗口；短参数 -f。默认只使用居中的 100×30 区域。
+
 .PARAMETER Help
     查看帮助。
 
@@ -21,17 +24,23 @@
     启动实时性能面板。
 
 .EXAMPLE
+    perf -f
+    以全屏模式启动。
+
+.EXAMPLE
     perf -h
     查看帮助。
 
 .NOTES
     Author: SUNC
-    Version: 1.0.0
+    Version: 1.0.1
 #>
 
 param(
     [Alias("h")]
     [switch]$Help,
+    [Alias("f")]
+    [switch]$Full,
     [double]$Interval = 1.0,
     [int]$History = 60
 )
@@ -49,13 +58,17 @@ Import-Module (Join-Path $toolkitRoot 'lib\Toolkit.psd1') -Force
 
 $helpSections = @(
     @{ Title = '使用方式'; Lines = @(
-        'perf               启动实时性能面板'
+        'perf               启动实时性能面板（默认 100×30 区域）'
+        'perf -f            以全屏模式启动'
         'perf -h            查看帮助'
+        'f                  运行中切换全屏 / 默认 100×30'
         'q / Esc / Ctrl+C   退出并打印性能快照'
+        '窗口最小 60×10；默认视口最多 100×30'
     ) }
     @{ Title = '参数'; Lines = @(
         '-Interval <秒>     采样与刷新间隔，默认 1.0，最小 0.5'
         '-History <点数>    保留的采样点数，默认 60'
+        '-Full, -f          占满终端窗口；默认 100×30 区域'
     ) }
 )
 
@@ -306,6 +319,13 @@ function Get-PerfScaleMax {
     return [double](10 * $pow)
 }
 
+function Format-PerfRate {
+    param([double]$KBs)
+    if ($KBs -ge 1048576) { return ('{0:N0} GB/s' -f ($KBs / 1048576)) }
+    if ($KBs -ge 1024) { return ('{0:N0} MB/s' -f ($KBs / 1024)) }
+    return ('{0:N0} KB/s' -f $KBs)
+}
+
 function Get-PerfMixedHex {
     param(
         [string]$HexColor,
@@ -452,21 +472,53 @@ function Get-PerfCardTitle {
     return "$bar $nameColored" + (' ' * $pad) + $right
 }
 
+function Get-PerfViewSize {
+    param(
+        [int]$WindowWidth,
+        [int]$WindowHeight,
+        [bool]$Full = $false
+    )
+    if ($Full) {
+        return [pscustomobject]@{
+            Width     = $WindowWidth
+            Height    = $WindowHeight
+            OffsetX   = 0
+            OffsetY   = 0
+            MinWidth  = 60
+            MinHeight = 10
+        }
+    }
+    $width = [math]::Min(100, $WindowWidth)
+    $height = [math]::Min(30, $WindowHeight)
+    return [pscustomobject]@{
+        Width     = $width
+        Height    = $height
+        OffsetX   = 0
+        OffsetY   = 0
+        MinWidth  = 60
+        MinHeight = 10
+    }
+}
+
 function Get-PerfLayout {
     param(
         [int]$Width,
         [int]$Height
     )
-    $small = [int][math]::Floor(($Width - 2) / 3)
-    $cpu = $Width - 1 - $small
-    $topRows = [int][math]::Floor(($Height - 5) / 2) + 1
-    $bottomRows = $Height - 5 - $topRows
+    $gap = 6
+    $small = [int][math]::Floor(($Width - 2 * $gap) / 3)
+    $cpu = $Width - $gap - $small
+    $chartRows = $Height - 8
+    $topRows = [int][math]::Floor($chartRows / 2) + 1
+    if ($topRows -gt ($chartRows - 1)) { $topRows = [math]::Max(1, $chartRows - 1) }
+    $bottomRows = $chartRows - $topRows
     return [pscustomobject]@{
         CpuWidth    = $cpu
         MemWidth    = $small
         SmallWidth  = $small
         TopRows     = $topRows
         BottomRows  = $bottomRows
+        Gap         = $gap
     }
 }
 
@@ -478,7 +530,10 @@ function Render-PerfFrame {
         $Static,
         [datetime]$Now
     )
-    $width = $Layout.CpuWidth + 1 + $Layout.MemWidth
+    $width = $Layout.CpuWidth + $Layout.Gap + $Layout.MemWidth
+    $leftPad = [int][math]::Floor(($Layout.Gap - 1) / 2)
+    $rightPad = $Layout.Gap - 1 - $leftPad
+    $divider = (' ' * $leftPad) + (Format-PerfAnsi -Text '│' -HexColor '#33333A') + (' ' * $rightPad)
     $lines = [System.Collections.Generic.List[string]]::new()
 
     $left = '性能监视'
@@ -487,6 +542,7 @@ function Render-PerfFrame {
     $right = Pad-PerfWidth -Text $right -Width ([math]::Min((Get-DisplayWidth $right), $maxRight))
     $pad = [math]::Max(1, $width - (Get-DisplayWidth $left) - (Get-DisplayWidth $right))
     $lines.Add($left + (' ' * $pad) + $right)
+    $lines.Add('')
 
     $cpuUnavailable = $History.cpu.Failures -ge 3
     $cpuValue = if ($Snapshot.CpuOk) { '{0:N0}%' -f $Snapshot.CpuPct } else { '--' }
@@ -497,7 +553,7 @@ function Render-PerfFrame {
 
     $cpuTitle = Get-PerfCardTitle -Name 'CPU' -Value $cpuValue -Sub $cpuSub -HexColor '#4CC2FF' -Width $Layout.CpuWidth -Unavailable $cpuUnavailable
     $memTitle = Get-PerfCardTitle -Name '内存' -Value $memValue -Sub $memSub -HexColor '#D63AC0' -Width $Layout.MemWidth -Unavailable $memUnavailable
-    $lines.Add($cpuTitle + ' ' + $memTitle)
+    $lines.Add($cpuTitle + $divider + $memTitle)
 
     $cpuValues = @(Get-PerfResampled -History $History.cpu -Columns ($Layout.CpuWidth - 5))
     $cpuChart = @(Get-PerfChartLines -Values $cpuValues -Rows $Layout.TopRows -HexColor '#4CC2FF' -ShowGrid $true)
@@ -505,15 +561,17 @@ function Render-PerfFrame {
     $memChart = @(Get-PerfChartLines -Values $memValues -Rows $Layout.TopRows -HexColor '#D63AC0' -ShowGrid $false)
     $yAxis = @(Get-PerfYAxisLines -Rows $Layout.TopRows)
     for ($r = 0; $r -lt $Layout.TopRows; $r++) {
-        $lines.Add($yAxis[$r] + ' ' + $cpuChart[$r] + ' ' + $memChart[$r])
+        $lines.Add($yAxis[$r] + ' ' + $cpuChart[$r] + $divider + $memChart[$r])
     }
+    $lines.Add('')
+    $lines.Add((Format-PerfAnsi -Text ('─' * $width) -HexColor '#33333A'))
     $lines.Add('')
 
     $diskUnavailable = $History.disk.Failures -ge 3
     $diskValue = if ($Snapshot.DiskOk) { '{0:N0}%' -f $Snapshot.DiskPct } else { '--' }
     $diskSub = if ($Snapshot.DiskOk) { '读 {0:N1} · 写 {1:N1} MB/s' -f $Snapshot.DiskReadMBs, $Snapshot.DiskWriteMBs } else { '' }
     $netUnavailable = $History.net.Failures -ge 3
-    $netValue = if ($Snapshot.NetOk) { '{0:N0} KB/s' -f $Snapshot.NetKBs } else { '--' }
+    $netValue = if ($Snapshot.NetOk) { Format-PerfRate -KBs $Snapshot.NetKBs } else { '--' }
     $netSub = if ($Snapshot.NetOk) { '↓ {0:N0} · ↑ {1:N0} KB/s' -f $Snapshot.NetRecvKBs, $Snapshot.NetSendKBs } else { '' }
     $gpuUnavailable = $History.gpu.Failures -ge 3
     $gpuValue = if ($Snapshot.GpuOk) { '{0:N0}%' -f $Snapshot.GpuPct } else { '--' }
@@ -522,7 +580,7 @@ function Render-PerfFrame {
     $diskTitle = Get-PerfCardTitle -Name '磁盘' -Value $diskValue -Sub $diskSub -HexColor '#4ECB71' -Width $Layout.SmallWidth -Unavailable $diskUnavailable
     $netTitle = Get-PerfCardTitle -Name '网络' -Value $netValue -Sub $netSub -HexColor '#FFB020' -Width $Layout.SmallWidth -Unavailable $netUnavailable
     $gpuTitle = Get-PerfCardTitle -Name 'GPU' -Value $gpuValue -Sub $gpuSub -HexColor '#4CC2FF' -Width $Layout.SmallWidth -Unavailable $gpuUnavailable
-    $lines.Add($diskTitle + ' ' + $netTitle + ' ' + $gpuTitle)
+    $lines.Add($diskTitle + $divider + $netTitle + $divider + $gpuTitle)
 
     $diskValues = @(Get-PerfResampled -History $History.disk -Columns $Layout.SmallWidth)
     $diskChart = @(Get-PerfChartLines -Values $diskValues -Rows $Layout.BottomRows -HexColor '#4ECB71' -ShowGrid $false)
@@ -535,9 +593,9 @@ function Render-PerfFrame {
     $gpuValues = @(Get-PerfResampled -History $History.gpu -Columns $Layout.SmallWidth)
     $gpuChart = @(Get-PerfChartLines -Values $gpuValues -Rows $Layout.BottomRows -HexColor '#4CC2FF' -ShowGrid $false)
     for ($r = 0; $r -lt $Layout.BottomRows; $r++) {
-        $lines.Add($diskChart[$r] + ' ' + $netChart[$r] + ' ' + $gpuChart[$r])
+        $lines.Add($diskChart[$r] + $divider + $netChart[$r] + $divider + $gpuChart[$r])
     }
-    $lines.Add('q 退出 · Ctrl+C 退出')
+    $lines.Add('q 退出 · Ctrl+C 退出 · f 全屏')
 
     return ($lines -join "`n")
 }
@@ -558,7 +616,7 @@ function Get-PerfExitSnapshotLines {
             $(if ($Snapshot.CpuOk) { '{0:N0}%' -f $Snapshot.CpuPct } else { '--' }),
             $(if ($Snapshot.MemOk) { '{0:N0}%' -f $Snapshot.MemPct } else { '--' }),
             $(if ($Snapshot.DiskOk) { '{0:N0}%' -f $Snapshot.DiskPct } else { '--' }),
-            $(if ($Snapshot.NetOk) { '{0:N0} KB/s' -f $Snapshot.NetKBs } else { '--' }),
+            $(if ($Snapshot.NetOk) { Format-PerfRate -KBs $Snapshot.NetKBs } else { '--' }),
             $(if ($Snapshot.GpuOk) { '{0:N0}%' -f $Snapshot.GpuPct } else { '--' })
         )
         $subs = @(
@@ -667,6 +725,20 @@ function Exit-PerfAltScreen {
     [Console]::Out.Write("`e[?25h`e[?1049l")
 }
 
+function Get-PerfExitSnapshotDisplayLines {
+    param(
+        $Snapshot,
+        $Static,
+        [datetime]$Now
+    )
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("性能快照 · {0}" -f $Now.ToString('HH:mm:ss'))
+    foreach ($line in @(Get-PerfExitSnapshotLines -Snapshot $Snapshot -Static $Static)) {
+        $lines.Add($line)
+    }
+    return @($lines)
+}
+
 function Write-PerfExitSnapshot {
     param(
         $Snapshot,
@@ -674,8 +746,7 @@ function Write-PerfExitSnapshot {
         [datetime]$Now
     )
     Write-Host ''
-    Write-Host ("性能快照 · {0}" -f $Now.ToString('HH:mm:ss'))
-    foreach ($line in @(Get-PerfExitSnapshotLines -Snapshot $Snapshot -Static $Static)) {
+    foreach ($line in @(Get-PerfExitSnapshotDisplayLines -Snapshot $Snapshot -Static $Static -Now $Now)) {
         Write-Host $line
     }
 }
@@ -684,6 +755,7 @@ function Invoke-PerfMain {
     param(
         [double]$Interval = 1.0,
         [int]$History = 60,
+        [switch]$Full,
         [switch]$Help
     )
     if ($Help) {
@@ -708,6 +780,8 @@ function Invoke-PerfMain {
     $snapshot = $null
     $entered = $false
     $fatalMessage = $null
+    $fullScreen = [bool]$Full
+    $lastViewKey = $null
     $histories = @{
         cpu  = (New-PerfHistory -Capacity $History)
         mem  = (New-PerfHistory -Capacity $History)
@@ -724,7 +798,7 @@ function Invoke-PerfMain {
         $entered = $true
         [Console]::TreatControlCAsInput = $true
         [Console]::Out.Write("`e[H`e[2J")
-        [Console]::Out.Write((Get-PerfCenteredLine -Text '正在采样…' -Width ([Console]::WindowWidth)))
+        [Console]::Out.Write('正在采样…')
 
         $sampler.Init()
         [void]$sampler.Collect()
@@ -736,13 +810,21 @@ function Invoke-PerfMain {
         while ($running) {
             $width = [Console]::WindowWidth
             $height = [Console]::WindowHeight
-            if ($width -lt 100 -or $height -lt 20) {
-                $message = "请将窗口调整为至少 100×20（当前 ${width}×${height}）"
+            $view = Get-PerfViewSize -WindowWidth $width -WindowHeight $height -Full $fullScreen
+            if ($width -lt $view.MinWidth -or $height -lt $view.MinHeight) {
+                $modeText = if ($fullScreen) { '全屏' } else { '默认 100×30' }
+                $message = "请将窗口调整为至少 $($view.MinWidth)×$($view.MinHeight)（$modeText；当前 ${width}×${height}）"
                 [Console]::Out.Write("`e[H`e[2J")
                 [Console]::Out.Write((Get-PerfCenteredLine -Text $message -Width $width))
                 while ([Console]::KeyAvailable) {
                     $key = [Console]::ReadKey($true)
                     $isCtrlC = ($key.Key -eq 'C') -and (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0)
+                    if ($key.Key -eq 'F') {
+                        $fullScreen = -not $fullScreen
+                        [Console]::Out.Write("`e[H`e[2J")
+                        $lastViewKey = $null
+                        break
+                    }
                     if ($key.Key -eq 'Q' -or $key.Key -eq 'Escape' -or $isCtrlC) {
                         $running = $false
                     }
@@ -764,14 +846,29 @@ function Invoke-PerfMain {
             Add-PerfHistorySample -History $histories.net  -Value $snapshot.NetKBs -Valid $snapshot.NetOk
             Add-PerfHistorySample -History $histories.gpu  -Value $snapshot.GpuPct -Valid $snapshot.GpuOk
 
-            $layout = Get-PerfLayout -Width $width -Height $height
+            $layout = Get-PerfLayout -Width $view.Width -Height $view.Height
             $frame = Render-PerfFrame -Snapshot $snapshot -History $histories -Layout $layout -Static $static -Now (Get-Date)
+            $viewKey = "$($view.Width)x$($view.Height)@$($view.OffsetX),$($view.OffsetY)"
+            if ($viewKey -ne $lastViewKey) {
+                [Console]::Out.Write("`e[H`e[2J")
+                $lastViewKey = $viewKey
+            }
             $frameLines = $frame -split "`n"
-            [Console]::Out.Write("`e[H" + (($frameLines | ForEach-Object { "$_`e[K" }) -join "`n"))
+            $prefix = ' ' * $view.OffsetX
+            $out = "`e[H"
+            if ($view.OffsetY -gt 0) { $out += ("`n" * $view.OffsetY) }
+            $out += (($frameLines | ForEach-Object { $prefix + $_ + "`e[K" }) -join "`n")
+            [Console]::Out.Write($out)
 
             while ([Console]::KeyAvailable) {
                 $key = [Console]::ReadKey($true)
                 $isCtrlC = ($key.Key -eq 'C') -and (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0)
+                if ($key.Key -eq 'F') {
+                    $fullScreen = -not $fullScreen
+                    [Console]::Out.Write("`e[H`e[2J")
+                    $lastViewKey = $null
+                    break
+                }
                 if ($key.Key -eq 'Q' -or $key.Key -eq 'Escape' -or $isCtrlC) {
                     $running = $false
                     break
@@ -799,5 +896,5 @@ function Invoke-PerfMain {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-PerfMain -Interval $Interval -History $History -Help:$Help
+    Invoke-PerfMain -Interval $Interval -History $History -Full:$Full -Help:$Help
 }
