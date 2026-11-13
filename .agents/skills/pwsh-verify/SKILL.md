@@ -28,7 +28,7 @@ foreach ($f in $files) {
 
 ## 2. 静态检查（PSScriptAnalyzer）
 
-递归覆盖 `cli-tools/`、`lib/`、`maintenance/`，排除 `.archive/` 与 `.scratch/`。用仓库根目录的配置文件运行（已排除 WriteHost / BOM / ShouldProcess / 复数命名 / 动词白名单）：
+递归覆盖全仓库 `*.ps1`，排除 `.archive/`、`.scratch/`、`.agents/`、`.superpowers/`。用仓库根目录的配置文件运行（已排除 WriteHost / BOM / ShouldProcess / 复数命名 / 动词白名单）：
 
 ```bash
 pwsh -NoProfile -Command '
@@ -57,7 +57,7 @@ $files | ForEach-Object {
 
 ## 4. 公共库（lib/）专项验证
 
-改动 `lib/` 时，在上面三层之外逐项检查（规则见 `AGENTS.md`「公共组件规则」与 `lib/README.md`）：
+改动 `lib/` 时，在上面三层之外逐项检查（规则见 `AGENTS.md`「公共组件（lib/）」与 `lib/README.md`）：
 
 - **导出登记**：新增函数已在 `Toolkit.psd1` 的 `FunctionsToExport` 中显式登记（禁止 `*`）；内部辅助函数未登记。
 - **兼容性**：没有删除或改名导出函数；行为变更走了新函数名，旧函数标 `[Obsolete]` 转调。
