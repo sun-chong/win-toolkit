@@ -40,7 +40,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.0.1
+    Version: 1.0.2
 #>
 
 param(
@@ -233,9 +233,9 @@ function New-PerfPdhSampler {
 
 # 读取 CPU、内存、GPU 静态信息；只在启动时调用一次。
 function Get-PerfStaticInfo {
-    $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
-    $cs = Get-CimInstance Win32_ComputerSystem
-    $gpus = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -notmatch 'Idd' -and $_.AdapterRAM }
+    $cpu = Get-CimInstance Win32_Processor -Property Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed | Select-Object -First 1
+    $cs = Get-CimInstance Win32_ComputerSystem -Property TotalPhysicalMemory
+    $gpus = Get-CimInstance Win32_VideoController -Property Name, AdapterRAM | Where-Object { $_.Name -notmatch 'Idd' -and $_.AdapterRAM }
 
     $cpuName = [string]$cpu.Name
     if ($cpuName.Length -gt 40) { $cpuName = $cpuName.Substring(0, 40) }
@@ -352,38 +352,6 @@ function Format-PerfRate {
     return ('{0:N0} KB/s' -f $KBs)
 }
 
-# 把指标色与深色背景混合，得到面积填充色。
-function Get-PerfMixedHex {
-    param(
-        [string]$HexColor,
-        [int]$Percent
-    )
-    $hex = $HexColor.TrimStart('#')
-    $r = [Convert]::ToInt32($hex.Substring(0, 2), 16)
-    $g = [Convert]::ToInt32($hex.Substring(2, 2), 16)
-    $b = [Convert]::ToInt32($hex.Substring(4, 2), 16)
-    $t = [math]::Max(0, [math]::Min(100, $Percent)) / 100.0
-    $bg = 12
-    $mr = [int][math]::Round($r * $t + $bg * (1 - $t))
-    $mg = [int][math]::Round($g * $t + $bg * (1 - $t))
-    $mb = [int][math]::Round($b * $t + $bg * (1 - $t))
-    return ('#{0:X2}{1:X2}{2:X2}' -f $mr, $mg, $mb)
-}
-
-# 用 ANSI 24-bit 前景色包裹文本。
-function Format-PerfAnsi {
-    param(
-        [string]$Text,
-        [string]$HexColor
-    )
-    if (-not $HexColor) { return $Text }
-    $hex = $HexColor.TrimStart('#')
-    $r = [Convert]::ToInt32($hex.Substring(0, 2), 16)
-    $g = [Convert]::ToInt32($hex.Substring(2, 2), 16)
-    $b = [Convert]::ToInt32($hex.Substring(4, 2), 16)
-    return ("`e[38;2;$r;$g;${b}m$Text`e[0m")
-}
-
 # 线性插值，把每个字符列扩展为两个点阵子列。
 function Expand-PerfValues {
     param([object[]]$Values)
@@ -416,7 +384,7 @@ function Get-PerfChartLines {
     )
     $subValues = @(Expand-PerfValues -Values $Values)
     $dotRows = $Rows * 4
-    $mixed = Get-PerfMixedHex -HexColor $HexColor -Percent 62
+    $mixed = Get-ToolkitMixedHex -HexColor $HexColor -Percent 62
     $gridRows = @(
         [int][math]::Round($Rows * 0.25)
         [int][math]::Round($Rows * 0.5)
@@ -446,40 +414,19 @@ function Get-PerfChartLines {
             }
             if ($bits -eq 0) {
                 if ($ShowGrid -and $gridRows -contains $row) {
-                    [void]$sb.Append((Format-PerfAnsi -Text '─' -HexColor '#33333A'))
+                    [void]$sb.Append((Format-ToolkitAnsi -Text '─' -HexColor '#33333A'))
                 } else {
                     [void]$sb.Append(' ')
                 }
             } else {
                 $ch = [char](0x2800 + $bits)
                 $color = if ($edge) { $HexColor } else { $mixed }
-                [void]$sb.Append((Format-PerfAnsi -Text ([string]$ch) -HexColor $color))
+                [void]$sb.Append((Format-ToolkitAnsi -Text ([string]$ch) -HexColor $color))
             }
         }
         $lines.Add($sb.ToString())
     }
     return @($lines)
-}
-
-# 按终端显示宽度补齐或截断文本。
-function Pad-PerfWidth {
-    param(
-        [string]$Text,
-        [int]$Width
-    )
-    $current = Get-DisplayWidth $Text
-    if ($current -le $Width) {
-        return $Text + (' ' * ($Width - $current))
-    }
-    $sb = [System.Text.StringBuilder]::new()
-    $acc = 0
-    foreach ($ch in $Text.ToCharArray()) {
-        $w = Get-DisplayWidth ([string]$ch)
-        if ($acc + $w -gt $Width) { break }
-        [void]$sb.Append($ch)
-        $acc += $w
-    }
-    return $sb.ToString()
 }
 
 # 生成大卡左侧的 Y 轴刻度行。
@@ -511,18 +458,18 @@ function Get-PerfCardTitle {
     )
     $valuePlain = if ($Unavailable) { '--' } else { $Value }
     $subPlain = if ($Unavailable) { '不可用' } else { $Sub }
-    $bar = Format-PerfAnsi -Text '▌' -HexColor $HexColor
-    $nameColored = Format-PerfAnsi -Text $Name -HexColor $HexColor
+    $bar = Format-ToolkitAnsi -Text '▌' -HexColor $HexColor
+    $nameColored = Format-ToolkitAnsi -Text $Name -HexColor $HexColor
     $leftWidth = 2 + (Get-DisplayWidth $Name)
     $valueWidth = Get-DisplayWidth $valuePlain
     $subAllow = [math]::Max(0, $Width - $leftWidth - $valueWidth - 2)
     if ($subPlain -and (Get-DisplayWidth $subPlain) -gt $subAllow) {
-        $subPlain = Pad-PerfWidth -Text $subPlain -Width $subAllow
+        $subPlain = Format-ToolkitDisplayText -Text $subPlain -Width $subAllow -Truncate
     }
     $rightPlainWidth = $valueWidth + $(if ($subPlain) { 1 + (Get-DisplayWidth $subPlain) } else { 0 })
     $pad = [math]::Max(1, $Width - $leftWidth - $rightPlainWidth)
-    $right = "`e[1m" + (Format-PerfAnsi -Text $valuePlain -HexColor '#FFFFFF')
-    if ($subPlain) { $right += ' ' + (Format-PerfAnsi -Text $subPlain -HexColor '#8A8A92') }
+    $right = "`e[1m" + (Format-ToolkitAnsi -Text $valuePlain -HexColor '#FFFFFF')
+    if ($subPlain) { $right += ' ' + (Format-ToolkitAnsi -Text $subPlain -HexColor '#8A8A92') }
     return "$bar $nameColored" + (' ' * $pad) + $right
 }
 
@@ -590,13 +537,13 @@ function Render-PerfFrame {
     $width = $Layout.CpuWidth + $Layout.Gap + $Layout.MemWidth
     $leftPad = [int][math]::Floor(($Layout.Gap - 1) / 2)
     $rightPad = $Layout.Gap - 1 - $leftPad
-    $divider = (' ' * $leftPad) + (Format-PerfAnsi -Text '│' -HexColor '#33333A') + (' ' * $rightPad)
+    $divider = (' ' * $leftPad) + (Format-ToolkitAnsi -Text '│' -HexColor '#33333A') + (' ' * $rightPad)
     $lines = [System.Collections.Generic.List[string]]::new()
 
     $left = '性能监视'
     $right = "$([Environment]::MachineName) · $($Now.ToString('HH:mm:ss'))"
     $maxRight = [math]::Max(1, $width - (Get-DisplayWidth $left) - 1)
-    $right = Pad-PerfWidth -Text $right -Width ([math]::Min((Get-DisplayWidth $right), $maxRight))
+    $right = Format-ToolkitDisplayText -Text $right -Width ([math]::Min((Get-DisplayWidth $right), $maxRight)) -Truncate
     $pad = [math]::Max(1, $width - (Get-DisplayWidth $left) - (Get-DisplayWidth $right))
     $lines.Add($left + (' ' * $pad) + $right)
     $lines.Add('')
@@ -621,7 +568,7 @@ function Render-PerfFrame {
         $lines.Add($yAxis[$r] + ' ' + $cpuChart[$r] + $divider + $memChart[$r])
     }
     $lines.Add('')
-    $lines.Add((Format-PerfAnsi -Text ('─' * $width) -HexColor '#33333A'))
+    $lines.Add((Format-ToolkitAnsi -Text ('─' * $width) -HexColor '#33333A'))
     $lines.Add('')
 
     $diskUnavailable = $History.disk.Failures -ge 3
@@ -689,12 +636,12 @@ function Get-PerfExitSnapshotLines {
 
     $rows = [System.Collections.Generic.List[string]]::new()
     for ($i = 0; $i -lt 5; $i++) {
-        $bar = Format-PerfAnsi -Text '▌' -HexColor $colors[$i]
-        $name = Pad-PerfWidth -Text $names[$i] -Width 4
-        $nameColored = Format-PerfAnsi -Text $name -HexColor $colors[$i]
-        $value = Pad-PerfWidth -Text $values[$i] -Width 9
-        $valueColored = "`e[1m" + (Format-PerfAnsi -Text $value -HexColor '#FFFFFF')
-        $subColored = Format-PerfAnsi -Text $subs[$i] -HexColor '#8A8A92'
+        $bar = Format-ToolkitAnsi -Text '▌' -HexColor $colors[$i]
+        $name = Format-ToolkitDisplayText -Text $names[$i] -Width 4
+        $nameColored = Format-ToolkitAnsi -Text $name -HexColor $colors[$i]
+        $value = Format-ToolkitDisplayText -Text $values[$i] -Width 9
+        $valueColored = "`e[1m" + (Format-ToolkitAnsi -Text $value -HexColor '#FFFFFF')
+        $subColored = Format-ToolkitAnsi -Text $subs[$i] -HexColor '#8A8A92'
         $rows.Add("$bar $nameColored $valueColored $subColored")
     }
     return @($rows)
@@ -723,16 +670,6 @@ function New-PerfFailedSnapshot {
         GpuPct       = 0.0
         GpuOk        = $false
     }
-}
-
-# 把文本在指定宽度内居中。
-function Get-PerfCenteredLine {
-    param(
-        [string]$Text,
-        [int]$Width
-    )
-    $pad = [math]::Max(0, [math]::Floor(($Width - (Get-DisplayWidth $Text)) / 2))
-    return (' ' * $pad) + $Text
 }
 
 # 把采样器读数换算成面板快照对象。
@@ -790,21 +727,6 @@ function Exit-PerfAltScreen {
     [Console]::Out.Write("`e[?25h`e[?1049l")
 }
 
-# 生成退出快照的完整输出行（标题 + 指标）。
-function Get-PerfExitSnapshotDisplayLines {
-    param(
-        $Snapshot,
-        $Static,
-        [datetime]$Now
-    )
-    $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.Add("性能快照 · {0}" -f $Now.ToString('HH:mm:ss'))
-    foreach ($line in @(Get-PerfExitSnapshotLines -Snapshot $Snapshot -Static $Static)) {
-        $lines.Add($line)
-    }
-    return @($lines)
-}
-
 # 在主屏打印退出快照。
 function Write-PerfExitSnapshot {
     param(
@@ -813,7 +735,8 @@ function Write-PerfExitSnapshot {
         [datetime]$Now
     )
     Write-Host ''
-    foreach ($line in @(Get-PerfExitSnapshotDisplayLines -Snapshot $Snapshot -Static $Static -Now $Now)) {
+    Write-Host ("性能快照 · {0}" -f $Now.ToString('HH:mm:ss'))
+    foreach ($line in @(Get-PerfExitSnapshotLines -Snapshot $Snapshot -Static $Static)) {
         Write-Host $line
     }
 }
@@ -917,7 +840,7 @@ function Invoke-PerfMain {
                 $modeText = if ($fullScreen) { '全屏' } else { '默认 100×30' }
                 $message = "请将窗口调整为至少 $($view.MinWidth)×$($view.MinHeight)（$modeText；当前 ${width}×${height}）"
                 [Console]::Out.Write("`e[H`e[2J")
-                [Console]::Out.Write((Get-PerfCenteredLine -Text $message -Width $width))
+                [Console]::Out.Write((Format-ToolkitDisplayText -Text $message -Width $width -Align Center))
                 while ([Console]::KeyAvailable) {
                     $key = [Console]::ReadKey($true)
                     $isCtrlC = ($key.Key -eq 'C') -and (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0)

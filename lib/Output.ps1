@@ -46,6 +46,155 @@ function Get-ToolkitColor {
     return [System.ConsoleColor]$colors[$Kind]
 }
 
+function Format-ToolkitAnsi {
+    <#
+    .SYNOPSIS
+        用 ANSI 24-bit 前景色包裹文本
+    .DESCRIPTION
+        返回带 `e[38;2;r;g;bm 前缀与 `e[0m 后缀的字符串；
+        HexColor 为空时原样返回。适合日志、图表等需要精确配色的输出。
+    .PARAMETER Text
+        要着色的文本
+    .PARAMETER HexColor
+        十六进制颜色，如 #4CC2FF
+    .EXAMPLE
+        Format-ToolkitAnsi -Text '完成' -HexColor '#4ECB71'
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
+    #>
+    param(
+        [string]$Text,
+        [string]$HexColor
+    )
+    if (-not $HexColor) { return $Text }
+    $hex = $HexColor.TrimStart('#')
+    $r = [Convert]::ToInt32($hex.Substring(0, 2), 16)
+    $g = [Convert]::ToInt32($hex.Substring(2, 2), 16)
+    $b = [Convert]::ToInt32($hex.Substring(4, 2), 16)
+    return ("`e[38;2;$r;$g;${b}m$Text`e[0m")
+}
+
+function Get-ToolkitMixedHex {
+    <#
+    .SYNOPSIS
+        把前景色与深色背景混合，得到面积填充色
+    .PARAMETER HexColor
+        前景十六进制颜色
+    .PARAMETER Percent
+        前景色占比（0-100）
+    .PARAMETER BackgroundRgb
+        背景亮度，默认 12（接近终端深色背景）
+    .EXAMPLE
+        Get-ToolkitMixedHex -HexColor '#4CC2FF' -Percent 62
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
+    #>
+    param(
+        [string]$HexColor,
+        [int]$Percent,
+        [int]$BackgroundRgb = 12
+    )
+    $hex = $HexColor.TrimStart('#')
+    $r = [Convert]::ToInt32($hex.Substring(0, 2), 16)
+    $g = [Convert]::ToInt32($hex.Substring(2, 2), 16)
+    $b = [Convert]::ToInt32($hex.Substring(4, 2), 16)
+    $t = [math]::Max(0, [math]::Min(100, $Percent)) / 100.0
+    $bg = [math]::Max(0, [math]::Min(255, $BackgroundRgb))
+    $mr = [int][math]::Round($r * $t + $bg * (1 - $t))
+    $mg = [int][math]::Round($g * $t + $bg * (1 - $t))
+    $mb = [int][math]::Round($b * $t + $bg * (1 - $t))
+    return ('#{0:X2}{1:X2}{2:X2}' -f $mr, $mg, $mb)
+}
+
+function Format-ToolkitDisplayText {
+    <#
+    .SYNOPSIS
+        按终端显示宽度补齐、截断或居中文本
+    .DESCRIPTION
+        以 Get-DisplayWidth 计算宽度（CJK 与全角字符按 2 列）。
+        超宽时：默认原样返回；-Truncate 时按显示宽度截断。
+        不超宽时：默认左对齐补齐；-Align Right / Center 改变对齐；-NoPad 不补齐。
+    .PARAMETER Text
+        要处理的文本
+    .PARAMETER Width
+        目标显示宽度
+    .PARAMETER Align
+        对齐方式：Left（默认）/ Right / Center
+    .PARAMETER Truncate
+        超宽时截断而不是原样返回
+    .PARAMETER NoPad
+        不补齐（仅截断或原样返回）
+    .EXAMPLE
+        Format-ToolkitDisplayText -Text 'CPU' -Width 6 -Right
+    .EXAMPLE
+        Format-ToolkitDisplayText -Text $name -Width 20 -Truncate
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
+    #>
+    param(
+        [string]$Text,
+        [int]$Width,
+        [ValidateSet('Left', 'Right', 'Center')]
+        [string]$Align = 'Left',
+        [switch]$Truncate,
+        [switch]$NoPad
+    )
+
+    if (-not $Text) { return $(if ($NoPad) { '' } else { ' ' * $Width }) }
+    $displayWidth = Get-DisplayWidth -Text $Text
+
+    if ($displayWidth -gt $Width) {
+        if (-not $Truncate) { return $Text }
+        $sb = [System.Text.StringBuilder]::new()
+        $used = 0
+        foreach ($ch in $Text.ToCharArray()) {
+            $w = Get-DisplayWidth -Text ([string]$ch)
+            if ($used + $w -gt $Width) { break }
+            [void]$sb.Append($ch)
+            $used += $w
+        }
+        return $sb.ToString()
+    }
+
+    if ($NoPad) { return $Text }
+    $padding = ' ' * ($Width - $displayWidth)
+    switch ($Align) {
+        'Right' { return $padding + $Text }
+        'Center' {
+            $left = [int][math]::Floor($padding.Length / 2)
+            return (' ' * $left) + $Text + (' ' * ($padding.Length - $left))
+        }
+        default { return $Text + $padding }
+    }
+}
+
+function Get-ToolkitConsoleWidth {
+    <#
+    .SYNOPSIS
+        读取当前终端宽度，读取失败时返回默认值
+    .PARAMETER Default
+        无法读取或宽度无效时使用的值，默认 120
+    .EXAMPLE
+        Get-ToolkitConsoleWidth -Default 100
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
+    #>
+    param([int]$Default = 120)
+
+    try {
+        $width = [Console]::WindowWidth
+        if ($width -gt 0) { return $width }
+    }
+    catch {
+        return $Default
+    }
+    return $Default
+}
+
 function Write-ToolkitMessage {
     <#
     .SYNOPSIS

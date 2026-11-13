@@ -18,7 +18,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.0.0
+    Version: 1.0.3
 #>
 
 param(
@@ -61,49 +61,19 @@ if ($Help) {
 }
 
 $TokenColor = '#FFB020'
+$ChartColor = '#C46849'
 $MutedColor = '#8A8A92'
 $ValueColor = '#FFFFFF'
 $AxisColor = '#33333A'
 $ChartRows = 8
 
-# 用 ANSI 24-bit 前景色包裹文本。
-function Format-CctkAnsi {
-    param(
-        [string]$Text,
-        [string]$HexColor
-    )
-    if (-not $HexColor) { return $Text }
-    $hex = $HexColor.TrimStart('#')
-    $r = [Convert]::ToInt32($hex.Substring(0, 2), 16)
-    $g = [Convert]::ToInt32($hex.Substring(2, 2), 16)
-    $b = [Convert]::ToInt32($hex.Substring(4, 2), 16)
-    return ("`e[38;2;$r;$g;${b}m$Text`e[0m")
-}
-
-# 把指标色与深色背景混合，得到面积填充色。
-function Get-CctkMixedHex {
-    param(
-        [string]$HexColor,
-        [int]$Percent
-    )
-    $hex = $HexColor.TrimStart('#')
-    $r = [Convert]::ToInt32($hex.Substring(0, 2), 16)
-    $g = [Convert]::ToInt32($hex.Substring(2, 2), 16)
-    $b = [Convert]::ToInt32($hex.Substring(4, 2), 16)
-    $t = [math]::Max(0, [math]::Min(100, $Percent)) / 100.0
-    $bg = 12
-    $mr = [int][math]::Round($r * $t + $bg * (1 - $t))
-    $mg = [int][math]::Round($g * $t + $bg * (1 - $t))
-    $mb = [int][math]::Round($b * $t + $bg * (1 - $t))
-    return ('#{0:X2}{1:X2}{2:X2}' -f $mr, $mg, $mb)
-}
-
-# Token 数量换算：亿以上用「亿」，不足一亿用「千万」。
+# Token 数量换算：亿以上用「亿」，千万级用「千万」，不足千万用「百万」。
 function Format-TokenAmount {
     param([double]$Value)
     if ($Value -le 0) { return '0' }
     if ($Value -ge 1e8) { return ('{0:F2}亿' -f ($Value / 1e8)) }
-    return ('{0:F2}千万' -f ($Value / 1e7))
+    if ($Value -ge 1e7) { return ('{0:F2}千万' -f ($Value / 1e7)) }
+    return ('{0:F2}百万' -f ($Value / 1e6))
 }
 
 # 用 Braille 2×4 点阵渲染按小时数值的静态面积图，每个值横向占 ColumnsPerValue 个字符列。
@@ -112,19 +82,21 @@ function Get-CctkChartLines {
         [double[]]$Values,
         [int]$Rows,
         [int]$ColumnsPerValue = 1,
-        [string]$HexColor
+        [string]$HexColor,
+        [double]$Max = 0
     )
-    $max = 0.0
-    foreach ($v in $Values) {
-        if ($v -gt $max) { $max = $v }
+    if ($Max -le 0) {
+        foreach ($v in $Values) {
+            if ($v -gt $Max) { $Max = $v }
+        }
     }
-    if ($max -le 0) {
+    if ($Max -le 0) {
         return @(for ($i = 0; $i -lt $Rows; $i++) { '' })
     }
 
     $columns = $Values.Count * $ColumnsPerValue
     $dotRows = $Rows * 4
-    $mixed = Get-CctkMixedHex -HexColor $HexColor -Percent 62
+    $mixed = Get-ToolkitMixedHex -HexColor $HexColor -Percent 62
     $bitLookup = @(0x01, 0x08, 0x02, 0x10, 0x04, 0x20, 0x40, 0x80)
     $lines = [System.Collections.Generic.List[string]]::new()
 
@@ -154,7 +126,7 @@ function Get-CctkChartLines {
             else {
                 $ch = [char](0x2800 + $bits)
                 $color = if ($edge) { $HexColor } else { $mixed }
-                [void]$sb.Append((Format-CctkAnsi -Text ([string]$ch) -HexColor $color))
+                [void]$sb.Append((Format-ToolkitAnsi -Text ([string]$ch) -HexColor $color))
             }
         }
         $lines.Add($sb.ToString())
@@ -176,7 +148,6 @@ today = datetime.date.today()
 start = int(datetime.datetime.combine(today, datetime.time()).timestamp())
 end = start + 86400
 total_expr = 'COALESCE(input_tokens,0)+COALESCE(output_tokens,0)+COALESCE(cache_read_tokens,0)+COALESCE(cache_creation_tokens,0)'
-join_expr = 'COALESCE(l.input_tokens,0)+COALESCE(l.output_tokens,0)+COALESCE(l.cache_read_tokens,0)+COALESCE(l.cache_creation_tokens,0)'
 
 cur.execute(
     'SELECT COALESCE(SUM(' + total_expr + '),0), COUNT(*), '
@@ -198,17 +169,16 @@ for h, value in cur.fetchall():
 
 providers = []
 cur.execute(
-    "SELECT COALESCE(p.name, l.provider_id, '未知供应商') AS provider, COUNT(*), "
-    'COALESCE(SUM(' + join_expr + '),0) '
+    "SELECT COALESCE(p.name, l.provider_id, '未知供应商') AS provider, "
+    'COALESCE(SUM(' + total_expr + '),0) '
     'FROM proxy_request_logs l LEFT JOIN providers p ON l.provider_id = p.id '
     'WHERE l.created_at >= ? AND l.created_at < ? '
-    'GROUP BY provider ORDER BY 3 DESC',
+    'GROUP BY provider ORDER BY 2 DESC',
     (start, end))
-for name, count, tokens in cur.fetchall():
-    providers.append({'name': name, 'requests': int(count), 'tokens': int(tokens)})
+for name, tokens in cur.fetchall():
+    providers.append({'name': name, 'tokens': int(tokens)})
 
 result = {
-    'date': today.isoformat(),
     'total': int(total),
     'requests': int(requests),
     'cacheRead': int(cache_read),
@@ -225,40 +195,6 @@ print(json.dumps(result, ensure_ascii=True))
         throw "查询 cc-switch 数据库失败，python 退出码: $LASTEXITCODE"
     }
     return ($json | ConvertFrom-Json)
-}
-
-# 按终端显示宽度右对齐/左对齐，避免中文错位。
-function Format-CctkPad {
-    param(
-        [string]$Text,
-        [int]$Width,
-        [switch]$Right
-    )
-    if (-not $Text) { return (' ' * $Width) }
-    $displayWidth = Get-DisplayWidth -Text $Text
-    if ($displayWidth -ge $Width) {
-        return $Text
-    }
-    $padding = ' ' * ($Width - $displayWidth)
-    if ($Right) { return $padding + $Text }
-    return $Text + $padding
-}
-
-# 截断超宽文本，保留显示宽度预算。
-function Format-CctkTruncate {
-    param(
-        [string]$Text,
-        [int]$Width
-    )
-    $result = ''
-    $used = 0
-    foreach ($ch in $Text.ToCharArray()) {
-        $w = Get-DisplayWidth -Text ([string]$ch)
-        if ($used + $w -gt $Width) { break }
-        $result += $ch
-        $used += $w
-    }
-    return $result
 }
 
 try {
@@ -288,8 +224,8 @@ try {
     $data = Get-CctkUsage -DatabasePath $dbPath
 
     Write-Host ''
-    Write-Host (' ' + (Format-CctkAnsi -Text '今日 Token 消耗' -HexColor $ValueColor) + (Format-CctkAnsi -Text " · $($data.date)" -HexColor $MutedColor))
-    Write-Host ''
+    $nowText = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    Write-Host (' ' + (Format-ToolkitAnsi -Text '今日 Token 消耗' -HexColor $ValueColor) + (Format-ToolkitAnsi -Text " · $nowText" -HexColor $MutedColor))
 
     if ($data.total -le 0) {
         Write-ToolkitMessage -Kind Warning -Text '今日暂无 Token 消耗记录'
@@ -299,9 +235,9 @@ try {
 
     # 头部汇总
     $hitRate = if ($data.cacheBasis -gt 0) { $data.cacheRead / $data.cacheBasis * 100 } else { 0 }
-    $summary = ' 总消耗  ' + (Format-CctkAnsi -Text (Format-TokenAmount -Value $data.total) -HexColor $TokenColor) +
-        '    请求数  ' + (Format-CctkAnsi -Text ([string]$data.requests) -HexColor $ValueColor) +
-        '    缓存命中率  ' + (Format-CctkAnsi -Text ('{0:F1}%' -f $hitRate) -HexColor $ValueColor)
+    $summary = ' 总消耗  ' + (Format-ToolkitAnsi -Text (Format-TokenAmount -Value $data.total) -HexColor $TokenColor) +
+        '    请求数  ' + (Format-ToolkitAnsi -Text ([string]$data.requests) -HexColor $ValueColor) +
+        '    缓存命中率  ' + (Format-ToolkitAnsi -Text ('{0:F1}%' -f $hitRate) -HexColor $ValueColor)
     Write-Host $summary
     Write-Host ''
 
@@ -320,26 +256,16 @@ try {
         if ($w -gt $yWidth) { $yWidth = $w }
     }
 
-    # 每小时列数：终端足够宽时 3 列，放不下时降到 2 列
-    $windowWidth = 120
-    try {
-        $consoleWidth = [Console]::WindowWidth
-        if ($consoleWidth -gt 0) { $windowWidth = $consoleWidth }
-    }
-    catch {
-        $windowWidth = 120
-    }
-    $hourColumns = 3
-    while ($hourColumns -gt 1 -and ($yWidth + 2 + 24 * $hourColumns) -gt $windowWidth) {
-        $hourColumns--
-    }
+    # 每小时列数：终端足够宽时 3 列，放不下时按宽度收缩
+    $windowWidth = Get-ToolkitConsoleWidth
+    $hourColumns = [math]::Max(1, [math]::Min(3, [int][math]::Floor(($windowWidth - $yWidth - 2) / 24)))
 
-    $chart = @(Get-CctkChartLines -Values $hourly -Rows $ChartRows -ColumnsPerValue $hourColumns -HexColor $TokenColor)
+    $chart = @(Get-CctkChartLines -Values $hourly -Rows $ChartRows -ColumnsPerValue $hourColumns -HexColor $ChartColor -Max $max)
 
     for ($r = 0; $r -lt $ChartRows; $r++) {
         $label = if ($yLabels.ContainsKey($r)) { $yLabels[$r] } else { '' }
-        $prefix = (Format-CctkPad -Text $label -Width $yWidth -Right) + ' '
-        $suffix = if ($yLabels.ContainsKey($r)) { Format-CctkAnsi -Text '┤' -HexColor $AxisColor } else { Format-CctkAnsi -Text '│' -HexColor $AxisColor }
+        $prefix = (Format-ToolkitDisplayText -Text $label -Width $yWidth -Align Right) + ' '
+        $suffix = if ($yLabels.ContainsKey($r)) { Format-ToolkitAnsi -Text '┤' -HexColor $AxisColor } else { Format-ToolkitAnsi -Text '│' -HexColor $AxisColor }
         Write-Host ($prefix + $suffix + $chart[$r])
     }
 
@@ -360,34 +286,33 @@ try {
         if ($pos + 1 -le $chartWidth) { $labelChars[$pos + 1] = $text[1] }
     }
     $blankPrefix = ' ' * ($yWidth + 1)
-    Write-Host ($blankPrefix + (Format-CctkAnsi -Text ([string]::new($axisChars)) -HexColor $AxisColor))
-    Write-Host ($blankPrefix + (Format-CctkAnsi -Text ([string]::new($labelChars)) -HexColor $MutedColor))
+    Write-Host ($blankPrefix + (Format-ToolkitAnsi -Text ([string]::new($axisChars)) -HexColor $AxisColor))
+    Write-Host ($blankPrefix + (Format-ToolkitAnsi -Text ([string]::new($labelChars)) -HexColor $MutedColor))
     Write-Host ''
 
     # 供应商分布
     $nameWidth = 20
     $amountWidth = 12
     $percentWidth = 8
-    $header = ' ' + (Format-CctkPad -Text '供应商' -Width $nameWidth) +
-        (Format-CctkPad -Text 'Tokens' -Width $amountWidth -Right) +
-        (Format-CctkPad -Text '占比' -Width $percentWidth -Right)
-    Write-Host (Format-CctkAnsi -Text $header -HexColor $MutedColor)
+    $header = ' ' + (Format-ToolkitDisplayText -Text '供应商' -Width $nameWidth) +
+        (Format-ToolkitDisplayText -Text 'Tokens' -Width $amountWidth -Align Right) +
+        (Format-ToolkitDisplayText -Text '占比' -Width $percentWidth -Align Right)
+    Write-Host (Format-ToolkitAnsi -Text $header -HexColor $MutedColor)
 
     foreach ($provider in $data.providers) {
         if ($provider.tokens -le 0) { continue }
-        $name = Format-CctkTruncate -Text ([string]$provider.name) -Width $nameWidth
-        $percent = if ($data.total -gt 0) { $provider.tokens / $data.total * 100 } else { 0 }
-        $line = ' ' + (Format-CctkPad -Text $name -Width $nameWidth) +
-            (Format-CctkAnsi -Text (Format-CctkPad -Text (Format-TokenAmount -Value $provider.tokens) -Width $amountWidth -Right) -HexColor $TokenColor) +
-            (Format-CctkAnsi -Text (Format-CctkPad -Text ('{0:F1}%' -f $percent) -Width $percentWidth -Right) -HexColor $MutedColor)
+        $name = Format-ToolkitDisplayText -Text ([string]$provider.name) -Width $nameWidth -Truncate -NoPad
+        $percent = $provider.tokens / $data.total * 100
+        $line = ' ' + (Format-ToolkitDisplayText -Text $name -Width $nameWidth) +
+            (Format-ToolkitAnsi -Text (Format-ToolkitDisplayText -Text (Format-TokenAmount -Value $provider.tokens) -Width $amountWidth -Align Right) -HexColor $TokenColor) +
+            (Format-ToolkitAnsi -Text (Format-ToolkitDisplayText -Text ('{0:F1}%' -f $percent) -Width $percentWidth -Align Right) -HexColor $MutedColor)
         Write-Host $line
     }
     Write-Host ''
 
     # 交互：打开 cc-switch
     if ($exeAvailable -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
-        Write-ToolkitMessage -Kind Muted -Text '输入 y 回车打开 cc-switch，直接回车或输入 n 取消'
-        $answer = Read-Host '>'
+        $answer = Read-Host '打开 cc-switch？（y/N）'
         if ($answer -match '^\s*[yY]\s*$') {
             Start-Process -FilePath $ccSwitchExe
         }
