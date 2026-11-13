@@ -75,7 +75,7 @@
 | `fzf` | `util -f`、`ef`、`op`、`ph` 的交互选择 |
 | Everything CLI (`es`) | `ef` 文件检索 |
 | `gh`（需 `gh auth login`） | `ghup` 的 GitHub Release 检查 |
-| `python` | `dgs-decrypt`、`ccstat`、`ppt`、`op`（拼音） |
+| `python` | `dgs-decrypt`、`cctk`、`ppt`、`op`（拼音） |
 | `npx` | `sync-skills` 分发在线 Skills |
 | `winget` | `update-all` 升级、`win-init` 安装；`wglink` 依赖其便携包目录 |
 | `git` | `update-all` 的 repos 阶段 |

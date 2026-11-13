@@ -52,6 +52,9 @@
   // ppt：ppt-master 仓库目录
   "PptMasterRoot": "%USERPROFILE%\\path\\to\\ppt-master",
 
+  // cctk：cc-switch 桌面应用可执行文件路径；支持 %LOCALAPPDATA% 等环境变量
+  "CcSwitchExePath": "%LOCALAPPDATA%\\Programs\\CC Switch\\cc-switch.exe",
+
   // ==========================================================================
   // 项目专属路径
   // --------------------------------------------------------------------------

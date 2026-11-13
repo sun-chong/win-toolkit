@@ -14,7 +14,7 @@
 | --- | --- |
 | `Path.ps1` | 逻辑目录解析、相对路径、配置路径值展开 |
 | `Config.ps1` | 配置读取与路径探测、运行时状态 |
-| `Output.ps1` | 语义消息、颜色、显示宽度 |
+| `Output.ps1` | 语义消息、16 色语义色、ANSI 24-bit 着色与混色、显示宽度、补齐/截断/居中对齐、终端宽度读取 |
 | `Help.ps1` | Comment-Based Help 解析、统一帮助渲染 |
 | `Process.ps1` | 子进程、超时、外部命令检测 |
 | `Proxy.ps1` | 代理探测与环境变量注入 |
@@ -25,7 +25,7 @@
 
 ## 修改规则
 
-以下为摘要，完整规则见 `AGENTS.md`「公共组件规则」。
+以下为摘要，完整规则见 `AGENTS.md`「公共组件（lib/）」。
 
 1. 新函数放进对应领域文件，补 `.SYNOPSIS` / `.DESCRIPTION` / `.PARAMETER` / `.EXAMPLE` / `.NOTES`。
 2. 在 `Toolkit.psd1` 的 `FunctionsToExport` 中**显式**登记，禁止 `*`。
