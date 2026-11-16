@@ -6,8 +6,10 @@
     将 .drawio 文件转换为 PDF（默认）或 PNG。
 
     默认扫描当前终端目录下的全部 .drawio 文件；也可用 -Path（短参数 -p）指定
-    一个或多个文件，支持通配符与绝对/相对路径。指定文件时同样只输出到当前目录，
-    除非用 -Output 指定输出目录。
+    一个或多个文件，支持通配符与绝对/相对路径。
+
+    指定文件时默认输出到当前目录；用 -Output 指定输出目录后，相对路径以每个
+    源文件所在目录为基准，例如 -o 界面 会把产物输出到源文件旁边的“界面”子目录。
 
     底层调用本机已安装的 draw.io Desktop 命令行导出，不走 COM。
 
@@ -23,7 +25,7 @@
     - d2p：转换当前目录下的所有 .drawio 文件为 PDF，输出到当前目录
     - d2p 图1.drawio：只转换指定文件，输出到当前目录
     - d2p *.drawio -f png：转换通配符匹配的文件为 PNG
-    - d2p -o out：转换并输出到当前目录下的 out 目录
+    - d2p -o out：转换并输出到源文件所在目录下的 out 目录
     - d2p -h：显示帮助信息
 
     注意：-p 现已表示 -Path 的别名（指定文件），不再表示 PNG；
@@ -43,10 +45,13 @@
     示例：d2p -f png
 
 .PARAMETER Output
-    输出目录。相对路径按当前目录解析；省略时输出到当前目录。
+    输出目录。相对路径以每个源文件所在目录为基准（不是当前命令行目录）；
+    指定多个文件且分处不同目录时，会在各自目录下分别创建；
+    绝对路径对所有文件统一生效；省略时输出到当前目录。
     目录不存在会自动创建；已存在则直接使用。
     短参数：-o
     示例：d2p -o pdfs
+    示例：d2p -p "D:\资料\界面\图.drawio" -o 界面
 
 .PARAMETER TimeoutSeconds
     每页导出等待的秒数，默认 60 秒；进程清理与退出确认另计最多 5 秒
@@ -73,14 +78,20 @@
     转换为 PDF 并输出到当前目录下的 pdfs 目录
 
 .EXAMPLE
-    d2p -p "D:\资料\流程图.drawio" -o "D:\资料\pdf"
-    转换指定位置的单个文件，产物输出到指定目录
+    d2p -p "D:\资料\界面\图.drawio" -o 界面
+    转换指定位置的单个文件，产物输出到源文件所在目录下的“界面”目录
+
+.EXAMPLE
+    d2p -p "D:\资料\流程\a.drawio" -o "D:\资料\pdf"
+    指定绝对输出目录，产物统一输出到该目录
 
 .NOTES
     Author: SUNC
-    Version: 2.0.0
+    Version: 2.1.0
 
     变更记录：
+    2.1.0 (SUNC) — -o 的相对路径改为以源文件所在目录为基准；多个源文件分处
+                    不同目录时，各自在其目录下创建子目录。
     2.0.0 (SUNC) — -p 由“转 PNG”改为 -Path 别名；PNG 改用 -f png；
                     -o 改为输出目录路径；新增 -Path/-p 指定文件导出。
 #>
@@ -365,14 +376,23 @@ if (-not $DrawioExe) {
 }
 
 # 输出目录只做路径计算与校验，不创建；创建在确认之后，保证取消时无副作用
+# 相对 -Output 以每个源文件所在目录为基准；绝对 -Output 统一使用；省略时输出到当前目录
+$OutputIsAbsolute = $false
 if ($Output) {
-    $OutputDir = if ([IO.Path]::IsPathRooted($Output)) { $Output } else { Join-Path $WorkDir $Output }
-    if (Test-Path -LiteralPath $OutputDir -PathType Leaf) {
-        Write-ToolkitMessage -Kind Error -Text "错误：输出路径是文件而非目录：$OutputDir"
-        exit 1
+    if ([IO.Path]::IsPathRooted($Output)) {
+        $OutputIsAbsolute = $true
+        $OutputDirs = @($Output)
+    } else {
+        $OutputDirs = @($DrawioFiles | ForEach-Object { Join-Path (Split-Path -Parent $_.FullName) $Output } | Sort-Object -Unique)
+    }
+    foreach ($Dir in $OutputDirs) {
+        if (Test-Path -LiteralPath $Dir -PathType Leaf) {
+            Write-ToolkitMessage -Kind Error -Text "错误：输出路径是文件而非目录：$Dir"
+            exit 1
+        }
     }
 } else {
-    $OutputDir = $WorkDir
+    $OutputDirs = @($WorkDir)
 }
 
 # 互斥必须在确认和清理之前取得，防止两个 d2p 同时清理、互相干扰
@@ -426,25 +446,35 @@ catch {
 }
 
 # 确认后创建输出目录
-if ($Output -and -not (Test-Path -LiteralPath $OutputDir -PathType Container)) {
-    New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+if ($Output) {
+    foreach ($Dir in $OutputDirs) {
+        if (-not (Test-Path -LiteralPath $Dir -PathType Container)) {
+            New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        }
+    }
 }
 
 # 测试输出目录写入权限
-try {
-    $TestFile = Join-Path $OutputDir ".write_test_$([guid]::NewGuid().ToString('N')).tmp"
-    [System.IO.File]::WriteAllText($TestFile, "test")
-    Remove-Item $TestFile -Force
-}
-catch {
-    Write-ToolkitMessage -Kind Error -Text "错误：输出目录无写入权限: $OutputDir"
-    $ExportLock.ReleaseMutex()
-    $ExportLock.Dispose()
-    exit 1
+foreach ($Dir in $OutputDirs) {
+    try {
+        $TestFile = Join-Path $Dir ".write_test_$([guid]::NewGuid().ToString('N')).tmp"
+        [System.IO.File]::WriteAllText($TestFile, "test")
+        Remove-Item $TestFile -Force
+    }
+    catch {
+        Write-ToolkitMessage -Kind Error -Text "错误：输出目录无写入权限: $Dir"
+        $ExportLock.ReleaseMutex()
+        $ExportLock.Dispose()
+        exit 1
+    }
 }
 
 $FormatName = $Format.ToUpperInvariant()
-Write-Host "输出目录: $OutputDir（格式：$FormatName）"
+if ($OutputDirs.Count -eq 1) {
+    Write-Host "输出目录: $($OutputDirs[0])（格式：$FormatName）"
+} else {
+    Write-Host "输出目录: 各源文件所在目录下的 $Output（共 $($OutputDirs.Count) 处，格式：$FormatName）"
+}
 
 # 统计 .drawio 文件的页数（解析 XML 中 <diagram> 节点数量）
 function Get-DrawioPageCount {
@@ -768,6 +798,13 @@ foreach ($File in $DrawioFiles) {
 
     $CurrentIndex++
 
+    # 相对 -Output 以该文件所在目录为基准；绝对 -Output 与省略时使用同一目录
+    $FileOutputDir = if ($Output -and -not $OutputIsAbsolute) {
+        Join-Path (Split-Path -Parent $File.FullName) $Output
+    } else {
+        $OutputDirs[0]
+    }
+
     # 显示进度
     Write-ProgressBar -Current $CurrentIndex -Total $TotalCount -CurrentFile $File.Name
 
@@ -797,7 +834,7 @@ foreach ($File in $DrawioFiles) {
             } else {
                 $OutBaseName = "$($File.BaseName).$Fmt"
             }
-            $OutputPath = Get-UniqueFileName -Directory $OutputDir -BaseName $OutBaseName
+            $OutputPath = Get-UniqueFileName -Directory $FileOutputDir -BaseName $OutBaseName
 
             try {
                 Invoke-DrawioPageWithRetry -Executable $DrawioExe -Source $File.FullName `
@@ -832,7 +869,11 @@ foreach ($File in $DrawioFiles) {
 $UnprocessedFiles = if ($script:BatchStopped) { $TotalCount - $CurrentIndex } else { 0 }
 Write-Host ""
 Write-ToolkitMessage -Kind Info -Text "================ 结果统计 ================"
-Write-Host "输出目录: $OutputDir"
+if ($OutputDirs.Count -eq 1) {
+    Write-Host "输出目录: $($OutputDirs[0])"
+} else {
+    Write-Host "输出目录: 各源文件所在目录下的 $Output（共 $($OutputDirs.Count) 处）"
+}
 Write-Host "文件总数: $TotalCount"
 Write-ToolkitMessage -Kind Success -Text "成功数量: $SuccessCount（共导出 $PageCount 页）"
 if ($script:BatchStopped) {
