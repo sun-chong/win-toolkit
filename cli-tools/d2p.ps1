@@ -89,9 +89,12 @@
 
 .NOTES
     Author: SUNC
-    Version: 2.1.1
+    Version: 2.1.2
 
     变更记录：
+    2.1.2 (SUNC) — 评审修复：显式空 Path/-o 报错；同名无扩展名文件不再遮蔽
+                    .drawio；方括号输入不按通配符展开；读取文件与创建目录失败
+                    不再静默；失败清单显示完整路径；输出目录校验提前到清理前。
     2.1.1 (SUNC) — -Path/-p 可省略 .drawio 扩展名，脚本自动补齐。
     2.1.0 (SUNC) — -o 的相对路径改为以源文件所在目录为基准；多个源文件分处
                     不同目录时，各自在其目录下创建子目录。
@@ -318,7 +321,7 @@ $FailedFiles = @()  # 记录失败的文件名及原因
 $WorkDir = (Get-Location).Path
 
 # 收集待转换文件：-Path 指定时逐个展开，省略时扫描当前目录
-if ($Path) {
+if ($PSBoundParameters.ContainsKey('Path')) {
     $DrawioFiles = @(
         $SeenPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         foreach ($Item in $Path) {
@@ -336,38 +339,51 @@ if ($Path) {
             if ($Item -notmatch '(?i)\.drawio$') {
                 $Candidates += "${Item}.drawio"
             }
+            # 只有输入像旧 PNG 用法时才附加提示
+            $PngHint = if ($Item -match '(?i)png') { '（PNG 请用 -f png）' } else { '' }
 
-            $Resolved = @()
+            $Matched = @()
+            $FoundAnyPath = $false
             foreach ($Candidate in $Candidates) {
                 if (Test-Path -LiteralPath $Candidate -PathType Container) {
                     Write-ToolkitMessage -Kind Error -Text "错误：不支持目录输入 $Candidate，请指定 .drawio 文件"
                     exit 1
                 }
-                # 字面路径优先：文件名含 [ ] 时按通配符展开会误匹配其他文件
+                # 字面路径优先；只有显式 * 或 ? 才做通配符展开，
+                # 避免文件名中的 [ ] 被当作字符集误匹配其他文件
                 $Resolved = if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
                     @((Get-Item -LiteralPath $Candidate).FullName)
-                } else {
+                } elseif ($Candidate -match '[*?]') {
                     @(Resolve-Path -Path $Candidate -ErrorAction SilentlyContinue | ForEach-Object { $_.ProviderPath })
+                } else {
+                    @()
                 }
-                if ($Resolved.Count -gt 0) { break }
+                foreach ($ResolvedPath in $Resolved) {
+                    $FoundAnyPath = $true
+                    if (Test-Path -LiteralPath $ResolvedPath -PathType Container) {
+                        Write-ToolkitMessage -Kind Error -Text "错误：不支持目录输入 $ResolvedPath，请指定 .drawio 文件"
+                        exit 1
+                    }
+                    if ($ResolvedPath -notmatch '(?i)\.drawio$') { continue }
+                    try {
+                        $FileInfo = Get-Item -LiteralPath $ResolvedPath -ErrorAction Stop
+                    }
+                    catch {
+                        Write-ToolkitMessage -Kind Error -Text "错误：无法读取文件 $ResolvedPath（$($_.Exception.Message)）"
+                        exit 1
+                    }
+                    if ($SeenPaths.Add($FileInfo.FullName)) { $Matched += $FileInfo }
+                }
+                # 找到可转换的 .drawio 才停止尝试下一个候选
+                if ($Matched.Count -gt 0) { break }
             }
-            if ($Resolved.Count -eq 0) {
+            if (-not $FoundAnyPath) {
                 $Hint = if ($Candidates.Count -gt 1) { "（也尝试过 ${Item}.drawio）" } else { '' }
-                Write-ToolkitMessage -Kind Error -Text "错误：未找到路径 $Item$Hint（PNG 请用 -f png）"
+                Write-ToolkitMessage -Kind Error -Text "错误：未找到路径 $Item$Hint$PngHint"
                 exit 1
             }
-            $Matched = @()
-            foreach ($ResolvedPath in $Resolved) {
-                if (Test-Path -LiteralPath $ResolvedPath -PathType Container) {
-                    Write-ToolkitMessage -Kind Error -Text "错误：不支持目录输入 $ResolvedPath，请指定 .drawio 文件"
-                    exit 1
-                }
-                if ($ResolvedPath -notmatch '(?i)\.drawio$') { continue }
-                $FileInfo = Get-Item -LiteralPath $ResolvedPath -ErrorAction SilentlyContinue
-                if ($FileInfo -and $SeenPaths.Add($FileInfo.FullName)) { $Matched += $FileInfo }
-            }
             if ($Matched.Count -eq 0) {
-                Write-ToolkitMessage -Kind Error -Text "错误：未找到 .drawio 文件 $Item（PNG 请用 -f png）"
+                Write-ToolkitMessage -Kind Error -Text "错误：未找到 .drawio 文件 $Item$PngHint"
                 exit 1
             }
             $Matched
@@ -397,7 +413,11 @@ if (-not $DrawioExe) {
 # 输出目录只做路径计算与校验，不创建；创建在确认之后，保证取消时无副作用
 # 相对 -Output 以每个源文件所在目录为基准；绝对 -Output 统一使用；省略时输出到当前目录
 $OutputIsAbsolute = $false
-if ($Output) {
+if ($PSBoundParameters.ContainsKey('Output')) {
+    if (-not $Output) {
+        Write-ToolkitMessage -Kind Error -Text "错误：输出目录不能为空"
+        exit 1
+    }
     if ([IO.Path]::IsPathRooted($Output)) {
         $OutputIsAbsolute = $true
         $OutputDirs = @($Output)
@@ -431,6 +451,38 @@ if (-not (Confirm-DrawioCleanup)) {
     exit 0
 }
 
+# 确认后立即创建并验证输出目录，避免强杀 draw.io 之后才发现不可写
+if ($PSBoundParameters.ContainsKey('Output')) {
+    foreach ($Dir in $OutputDirs) {
+        if (-not (Test-Path -LiteralPath $Dir -PathType Container)) {
+            try {
+                New-Item -ItemType Directory -Path $Dir -Force -ErrorAction Stop | Out-Null
+            }
+            catch {
+                Write-ToolkitMessage -Kind Error -Text "错误：无法创建输出目录 $Dir（$($_.Exception.Message)）"
+                $ExportLock.ReleaseMutex()
+                $ExportLock.Dispose()
+                exit 1
+            }
+        }
+    }
+}
+
+# 测试输出目录写入权限
+foreach ($Dir in $OutputDirs) {
+    try {
+        $TestFile = Join-Path $Dir ".write_test_$([guid]::NewGuid().ToString('N')).tmp"
+        [System.IO.File]::WriteAllText($TestFile, "test")
+        Remove-Item $TestFile -Force
+    }
+    catch {
+        Write-ToolkitMessage -Kind Error -Text "错误：输出目录无写入权限: $Dir"
+        $ExportLock.ReleaseMutex()
+        $ExportLock.Dispose()
+        exit 1
+    }
+}
+
 # 确认后重新枚举，清理全部 draw.io（包括冻结、假死和半退出残留）
 try {
     Initialize-DrawioNative
@@ -462,30 +514,6 @@ catch {
     $ExportLock.ReleaseMutex()
     $ExportLock.Dispose()
     exit 1
-}
-
-# 确认后创建输出目录
-if ($Output) {
-    foreach ($Dir in $OutputDirs) {
-        if (-not (Test-Path -LiteralPath $Dir -PathType Container)) {
-            New-Item -ItemType Directory -Path $Dir -Force | Out-Null
-        }
-    }
-}
-
-# 测试输出目录写入权限
-foreach ($Dir in $OutputDirs) {
-    try {
-        $TestFile = Join-Path $Dir ".write_test_$([guid]::NewGuid().ToString('N')).tmp"
-        [System.IO.File]::WriteAllText($TestFile, "test")
-        Remove-Item $TestFile -Force
-    }
-    catch {
-        Write-ToolkitMessage -Kind Error -Text "错误：输出目录无写入权限: $Dir"
-        $ExportLock.ReleaseMutex()
-        $ExportLock.Dispose()
-        exit 1
-    }
 }
 
 $FormatName = $Format.ToUpperInvariant()
@@ -831,7 +859,7 @@ foreach ($File in $DrawioFiles) {
         # 检测 DGS 密文：密文无法解析也无法被 draw.io 读取
         if (Test-DgsEncrypted -Path $File.FullName) {
             Write-ToolkitMessage -Kind Error -Text "    错误: DGS 透明加密文件，请先解密（可使用 dgs-decrypt）"
-            $FailedFiles += "$($File.Name) - DGS 透明加密文件"
+            $FailedFiles += "$($File.FullName) - DGS 透明加密文件"
             $FailCount++
             continue
         }
@@ -864,7 +892,7 @@ foreach ($File in $DrawioFiles) {
             catch {
                 $ErrorMessage = $_.Exception.Message
                 Write-ToolkitMessage -Kind Error -Text "    错误: 第 $Page 页导出失败 - $ErrorMessage"
-                $FailedFiles += "$($File.Name) 第 $Page 页 - $ErrorMessage"
+                $FailedFiles += "$($File.FullName) 第 $Page 页 - $ErrorMessage"
                 $FailCount++
                 $FilePageFailCount++
                 if ($_.Exception.Data['StopBatch']) { $script:BatchStopped = $true }
@@ -879,7 +907,7 @@ foreach ($File in $DrawioFiles) {
     catch {
         $ErrorMessage = $_.Exception.Message
         Write-ToolkitMessage -Kind Error -Text "    错误: $ErrorMessage"
-        $FailedFiles += "$($File.Name) - $ErrorMessage"
+        $FailedFiles += "$($File.FullName) - $ErrorMessage"
         $FailCount++
     }
 }
