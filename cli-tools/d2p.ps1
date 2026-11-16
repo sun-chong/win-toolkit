@@ -3,7 +3,11 @@
     draw.io 转 PDF / PNG
 
 .DESCRIPTION
-    将当前终端目录下的 .drawio 文件批量转换为 PDF（默认）或 PNG。
+    将 .drawio 文件转换为 PDF（默认）或 PNG。
+
+    默认扫描当前终端目录下的全部 .drawio 文件；也可用 -Path（短参数 -p）指定
+    一个或多个文件，支持通配符与绝对/相对路径。指定文件时同样只输出到当前目录，
+    除非用 -Output 指定输出目录。
 
     底层调用本机已安装的 draw.io Desktop 命令行导出，不走 COM。
 
@@ -16,19 +20,33 @@
     若进程无法确认退出，立即停止转换，避免残留进程累积。
 
     使用方式：
-    - d2p：转换当前目录下的所有 .drawio 文件为 PDF
-    - d2p -p：转换为 PNG
-    - d2p -o <子目录>：转换并输出到指定子目录
+    - d2p：转换当前目录下的所有 .drawio 文件为 PDF，输出到当前目录
+    - d2p 图1.drawio：只转换指定文件，输出到当前目录
+    - d2p *.drawio -f png：转换通配符匹配的文件为 PNG
+    - d2p -o out：转换并输出到当前目录下的 out 目录
     - d2p -h：显示帮助信息
 
-.PARAMETER ToPng
-    输出 PNG 而非默认的 PDF
-    短参数：-p
+    注意：-p 现已表示 -Path 的别名（指定文件），不再表示 PNG；
+    转 PNG 请使用 -f png 或 -Format png。
 
-.PARAMETER OutputSubdir
-    指定输出子目录名，默认当前目录
+.PARAMETER Path
+    指定要转换的 .drawio 文件，可提供多个，支持通配符与绝对/相对路径。
+    省略时扫描当前目录下的全部 .drawio 文件。目录不作为输入。
+    短参数：-p
+    示例：d2p 图1.drawio
+    示例：d2p *.drawio -f png
+    示例：d2p -p "D:\资料\流程图.drawio"
+
+.PARAMETER Format
+    输出格式：pdf（默认）或 png
+    短参数：-f
+    示例：d2p -f png
+
+.PARAMETER Output
+    输出目录。相对路径按当前目录解析；省略时输出到当前目录。
+    目录不存在会自动创建；已存在则直接使用。
     短参数：-o
-    示例：-o pdfs
+    示例：d2p -o pdfs
 
 .PARAMETER TimeoutSeconds
     每页导出等待的秒数，默认 60 秒；进程清理与退出确认另计最多 5 秒
@@ -40,27 +58,44 @@
 
 .EXAMPLE
     d2p
-    转换当前目录下的所有 .drawio 文件为 PDF
+    转换当前目录下的所有 .drawio 文件为 PDF，产物放在当前目录
 
 .EXAMPLE
-    d2p -p
-    转换当前目录下的所有 .drawio 文件为 PNG
+    d2p 图1.drawio
+    只转换指定的文件，产物放在当前目录
+
+.EXAMPLE
+    d2p *.drawio -f png
+    转换通配符匹配到的文件为 PNG
 
 .EXAMPLE
     d2p -o pdfs
-    转换为 PDF 并输出到当前目录下的 pdfs 子目录
+    转换为 PDF 并输出到当前目录下的 pdfs 目录
+
+.EXAMPLE
+    d2p -p "D:\资料\流程图.drawio" -o "D:\资料\pdf"
+    转换指定位置的单个文件，产物输出到指定目录
 
 .NOTES
     Author: SUNC
-    Version: 1.1.1
+    Version: 2.0.0
+
+    变更记录：
+    2.0.0 (SUNC) — -p 由“转 PNG”改为 -Path 别名；PNG 改用 -f png；
+                    -o 改为输出目录路径；新增 -Path/-p 指定文件导出。
 #>
 
 param(
     [Alias("p")]
-    [switch]$ToPng,
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
+    [string[]]$Path,
+
+    [Alias("f")]
+    [ValidateSet("pdf", "png")]
+    [string]$Format = "pdf",
 
     [Alias("o")]
-    [string]$OutputSubdir,
+    [string]$Output,
 
     [Alias("t")]
     [ValidateRange(1, 86400)]
@@ -268,11 +303,52 @@ $FailedFiles = @()  # 记录失败的文件名及原因
 # 获取当前终端所在目录（非脚本所在目录）
 $WorkDir = (Get-Location).Path
 
-# 扫描 drawio 文件
-$DrawioFiles = Get-ChildItem -Path $WorkDir -Filter "*.drawio" -File
+# 收集待转换文件：-Path 指定时逐个展开，省略时扫描当前目录
+if ($Path) {
+    $DrawioFiles = @(
+        $SeenPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($Item in $Path) {
+            if (-not $Item) {
+                Write-ToolkitMessage -Kind Error -Text "错误：路径不能为空"
+                exit 1
+            }
+            if (Test-Path -LiteralPath $Item -PathType Container) {
+                Write-ToolkitMessage -Kind Error -Text "错误：不支持目录输入 $Item，请指定 .drawio 文件"
+                exit 1
+            }
+            # 字面路径优先：文件名含 [ ] 时按通配符展开会误匹配其他文件
+            $Resolved = if (Test-Path -LiteralPath $Item -PathType Leaf) {
+                @((Get-Item -LiteralPath $Item).FullName)
+            } else {
+                @(Resolve-Path -Path $Item -ErrorAction SilentlyContinue | ForEach-Object { $_.ProviderPath })
+            }
+            if ($Resolved.Count -eq 0) {
+                Write-ToolkitMessage -Kind Error -Text "错误：未找到路径 $Item（PNG 请用 -f png）"
+                exit 1
+            }
+            $Matched = @()
+            foreach ($ResolvedPath in $Resolved) {
+                if (Test-Path -LiteralPath $ResolvedPath -PathType Container) {
+                    Write-ToolkitMessage -Kind Error -Text "错误：不支持目录输入 $ResolvedPath，请指定 .drawio 文件"
+                    exit 1
+                }
+                if ($ResolvedPath -notmatch '(?i)\.drawio$') { continue }
+                $FileInfo = Get-Item -LiteralPath $ResolvedPath -ErrorAction SilentlyContinue
+                if ($FileInfo -and $SeenPaths.Add($FileInfo.FullName)) { $Matched += $FileInfo }
+            }
+            if ($Matched.Count -eq 0) {
+                Write-ToolkitMessage -Kind Error -Text "错误：未找到 .drawio 文件 $Item（PNG 请用 -f png）"
+                exit 1
+            }
+            $Matched
+        }
+    )
+} else {
+    $DrawioFiles = @(Get-ChildItem -Path $WorkDir -Filter "*.drawio" -File)
+}
 
 if ($DrawioFiles.Count -eq 0) {
-    Write-ToolkitMessage -Kind Error -Text "错误：当前目录下未找到 .drawio 文件。"
+    Write-ToolkitMessage -Kind Error -Text "错误：未找到可转换的 .drawio 文件。"
     exit 1
 }
 
@@ -286,6 +362,17 @@ $DrawioExe = $DrawioExeCandidates | Where-Object { Test-Path $_ } | Select-Objec
 if (-not $DrawioExe) {
     Write-ToolkitMessage -Kind Error -Text "错误：未找到 draw.io Desktop（draw.io.exe），请先安装。"
     exit 1
+}
+
+# 输出目录只做路径计算与校验，不创建；创建在确认之后，保证取消时无副作用
+if ($Output) {
+    $OutputDir = if ([IO.Path]::IsPathRooted($Output)) { $Output } else { Join-Path $WorkDir $Output }
+    if (Test-Path -LiteralPath $OutputDir -PathType Leaf) {
+        Write-ToolkitMessage -Kind Error -Text "错误：输出路径是文件而非目录：$OutputDir"
+        exit 1
+    }
+} else {
+    $OutputDir = $WorkDir
 }
 
 # 互斥必须在确认和清理之前取得，防止两个 d2p 同时清理、互相干扰
@@ -338,23 +425,9 @@ catch {
     exit 1
 }
 
-# 处理输出目录
-if ($OutputSubdir) {
-    $OutputDir = Join-Path $WorkDir $OutputSubdir
-
-    # 处理子目录重名：递增括号法
-    $Counter = 1
-    while (Test-Path $OutputDir -PathType Container) {
-        $OutputDir = Join-Path $WorkDir "$OutputSubdir($Counter)"
-        $Counter++
-    }
-
-    # 创建输出目录
-    if (-not (Test-Path $OutputDir)) {
-        New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-    }
-} else {
-    $OutputDir = $WorkDir
+# 确认后创建输出目录
+if ($Output -and -not (Test-Path -LiteralPath $OutputDir -PathType Container)) {
+    New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 }
 
 # 测试输出目录写入权限
@@ -370,7 +443,7 @@ catch {
     exit 1
 }
 
-$FormatName = if ($ToPng) { "PNG" } else { "PDF" }
+$FormatName = $Format.ToUpperInvariant()
 Write-Host "输出目录: $OutputDir（格式：$FormatName）"
 
 # 统计 .drawio 文件的页数（解析 XML 中 <diagram> 节点数量）
@@ -688,7 +761,7 @@ function Invoke-DrawioPageWithRetry {
 $TotalCount = $DrawioFiles.Count
 $CurrentIndex = 0
 $script:BatchStopped = $false
-$Fmt = $FormatName.ToLower()
+$Fmt = $Format.ToLowerInvariant()
 
 foreach ($File in $DrawioFiles) {
     if ($script:BatchStopped) { break }
