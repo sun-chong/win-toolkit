@@ -3,7 +3,13 @@
     draw.io 转 PDF / PNG
 
 .DESCRIPTION
-    将当前终端目录下的 .drawio 文件批量转换为 PDF（默认）或 PNG。
+    将 .drawio 文件转换为 PDF（默认）或 PNG。
+
+    默认扫描当前终端目录下的全部 .drawio 文件；也可用 -Path（短参数 -p）指定
+    一个或多个文件，支持通配符与绝对/相对路径。
+
+    指定文件时默认输出到当前目录；用 -Output 指定输出目录后，相对路径以每个
+    源文件所在目录为基准，例如 -o 界面 会把产物输出到源文件旁边的“界面”子目录。
 
     底层调用本机已安装的 draw.io Desktop 命令行导出，不走 COM。
 
@@ -16,19 +22,38 @@
     若进程无法确认退出，立即停止转换，避免残留进程累积。
 
     使用方式：
-    - d2p：转换当前目录下的所有 .drawio 文件为 PDF
-    - d2p -p：转换为 PNG
-    - d2p -o <子目录>：转换并输出到指定子目录
+    - d2p：转换当前目录下的所有 .drawio 文件为 PDF，输出到当前目录
+    - d2p 图1.drawio：只转换指定文件，输出到当前目录
+    - d2p *.drawio -f png：转换通配符匹配的文件为 PNG
+    - d2p -o out：转换并输出到源文件所在目录下的 out 目录
     - d2p -h：显示帮助信息
 
-.PARAMETER ToPng
-    输出 PNG 而非默认的 PDF
-    短参数：-p
+    注意：-p 现已表示 -Path 的别名（指定文件），不再表示 PNG；
+    转 PNG 请使用 -f png 或 -Format png。
 
-.PARAMETER OutputSubdir
-    指定输出子目录名，默认当前目录
+.PARAMETER Path
+    指定要转换的 .drawio 文件，可提供多个，支持通配符与绝对/相对路径。
+    可省略 .drawio 扩展名，脚本会自动补齐（如 图1 等价于 图1.drawio）。
+    省略时扫描当前目录下的全部 .drawio 文件。目录不作为输入。
+    短参数：-p
+    示例：d2p 图1.drawio
+    示例：d2p 图1
+    示例：d2p *.drawio -f png
+    示例：d2p -p "D:\资料\流程图.drawio"
+
+.PARAMETER Format
+    输出格式：pdf（默认）或 png
+    短参数：-f
+    示例：d2p -f png
+
+.PARAMETER Output
+    输出目录。相对路径以每个源文件所在目录为基准（不是当前命令行目录）；
+    指定多个文件且分处不同目录时，会在各自目录下分别创建；
+    绝对路径对所有文件统一生效；省略时输出到当前目录。
+    目录不存在会自动创建；已存在则直接使用。
     短参数：-o
-    示例：-o pdfs
+    示例：d2p -o pdfs
+    示例：d2p -p "D:\资料\界面\图.drawio" -o 界面
 
 .PARAMETER TimeoutSeconds
     每页导出等待的秒数，默认 60 秒；进程清理与退出确认另计最多 5 秒
@@ -40,27 +65,54 @@
 
 .EXAMPLE
     d2p
-    转换当前目录下的所有 .drawio 文件为 PDF
+    转换当前目录下的所有 .drawio 文件为 PDF，产物放在当前目录
 
 .EXAMPLE
-    d2p -p
-    转换当前目录下的所有 .drawio 文件为 PNG
+    d2p 图1.drawio
+    只转换指定的文件，产物放在当前目录
+
+.EXAMPLE
+    d2p *.drawio -f png
+    转换通配符匹配到的文件为 PNG
 
 .EXAMPLE
     d2p -o pdfs
-    转换为 PDF 并输出到当前目录下的 pdfs 子目录
+    转换当前目录下的文件，并输出到源文件所在目录下的 pdfs 目录
+
+.EXAMPLE
+    d2p -p "D:\资料\界面\图.drawio" -o 界面
+    转换指定位置的单个文件，产物输出到源文件所在目录下的“界面”目录
+
+.EXAMPLE
+    d2p -p "D:\资料\流程\a.drawio" -o "D:\资料\pdf"
+    指定绝对输出目录，产物统一输出到该目录
 
 .NOTES
     Author: SUNC
-    Version: 1.1.1
+    Version: 2.1.2
+
+    变更记录：
+    2.1.2 (SUNC) — 评审修复：显式空 Path/-o 报错；同名无扩展名文件不再遮蔽
+                    .drawio；方括号输入不按通配符展开；读取文件与创建目录失败
+                    不再静默；失败清单显示完整路径；输出目录校验提前到清理前。
+    2.1.1 (SUNC) — -Path/-p 可省略 .drawio 扩展名，脚本自动补齐。
+    2.1.0 (SUNC) — -o 的相对路径改为以源文件所在目录为基准；多个源文件分处
+                    不同目录时，各自在其目录下创建子目录。
+    2.0.0 (SUNC) — -p 由“转 PNG”改为 -Path 别名；PNG 改用 -f png；
+                    -o 改为输出目录路径；新增 -Path/-p 指定文件导出。
 #>
 
 param(
     [Alias("p")]
-    [switch]$ToPng,
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
+    [string[]]$Path,
+
+    [Alias("f")]
+    [ValidateSet("pdf", "png")]
+    [string]$Format = "pdf",
 
     [Alias("o")]
-    [string]$OutputSubdir,
+    [string]$Output,
 
     [Alias("t")]
     [ValidateRange(1, 86400)]
@@ -268,11 +320,81 @@ $FailedFiles = @()  # 记录失败的文件名及原因
 # 获取当前终端所在目录（非脚本所在目录）
 $WorkDir = (Get-Location).Path
 
-# 扫描 drawio 文件
-$DrawioFiles = Get-ChildItem -Path $WorkDir -Filter "*.drawio" -File
+# 收集待转换文件：-Path 指定时逐个展开，省略时扫描当前目录
+if ($PSBoundParameters.ContainsKey('Path')) {
+    $DrawioFiles = @(
+        $SeenPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($Item in $Path) {
+            if (-not $Item) {
+                Write-ToolkitMessage -Kind Error -Text "错误：路径不能为空"
+                exit 1
+            }
+            if (Test-Path -LiteralPath $Item -PathType Container) {
+                Write-ToolkitMessage -Kind Error -Text "错误：不支持目录输入 $Item，请指定 .drawio 文件"
+                exit 1
+            }
+
+            # 省略 .drawio 扩展名时自动补齐；已带扩展名则不重复尝试
+            $Candidates = @($Item)
+            if ($Item -notmatch '(?i)\.drawio$') {
+                $Candidates += "${Item}.drawio"
+            }
+            # 只有输入像旧 PNG 用法时才附加提示
+            $PngHint = if ($Item -match '(?i)png') { '（PNG 请用 -f png）' } else { '' }
+
+            $Matched = @()
+            $FoundAnyPath = $false
+            foreach ($Candidate in $Candidates) {
+                if (Test-Path -LiteralPath $Candidate -PathType Container) {
+                    Write-ToolkitMessage -Kind Error -Text "错误：不支持目录输入 $Candidate，请指定 .drawio 文件"
+                    exit 1
+                }
+                # 字面路径优先；只有显式 * 或 ? 才做通配符展开，
+                # 避免文件名中的 [ ] 被当作字符集误匹配其他文件
+                $Resolved = if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+                    @((Get-Item -LiteralPath $Candidate).FullName)
+                } elseif ($Candidate -match '[*?]') {
+                    @(Resolve-Path -Path $Candidate -ErrorAction SilentlyContinue | ForEach-Object { $_.ProviderPath })
+                } else {
+                    @()
+                }
+                foreach ($ResolvedPath in $Resolved) {
+                    $FoundAnyPath = $true
+                    if (Test-Path -LiteralPath $ResolvedPath -PathType Container) {
+                        Write-ToolkitMessage -Kind Error -Text "错误：不支持目录输入 $ResolvedPath，请指定 .drawio 文件"
+                        exit 1
+                    }
+                    if ($ResolvedPath -notmatch '(?i)\.drawio$') { continue }
+                    try {
+                        $FileInfo = Get-Item -LiteralPath $ResolvedPath -ErrorAction Stop
+                    }
+                    catch {
+                        Write-ToolkitMessage -Kind Error -Text "错误：无法读取文件 $ResolvedPath（$($_.Exception.Message)）"
+                        exit 1
+                    }
+                    if ($SeenPaths.Add($FileInfo.FullName)) { $Matched += $FileInfo }
+                }
+                # 找到可转换的 .drawio 才停止尝试下一个候选
+                if ($Matched.Count -gt 0) { break }
+            }
+            if (-not $FoundAnyPath) {
+                $Hint = if ($Candidates.Count -gt 1) { "（也尝试过 ${Item}.drawio）" } else { '' }
+                Write-ToolkitMessage -Kind Error -Text "错误：未找到路径 $Item$Hint$PngHint"
+                exit 1
+            }
+            if ($Matched.Count -eq 0) {
+                Write-ToolkitMessage -Kind Error -Text "错误：未找到 .drawio 文件 $Item$PngHint"
+                exit 1
+            }
+            $Matched
+        }
+    )
+} else {
+    $DrawioFiles = @(Get-ChildItem -Path $WorkDir -Filter "*.drawio" -File)
+}
 
 if ($DrawioFiles.Count -eq 0) {
-    Write-ToolkitMessage -Kind Error -Text "错误：当前目录下未找到 .drawio 文件。"
+    Write-ToolkitMessage -Kind Error -Text "错误：未找到可转换的 .drawio 文件。"
     exit 1
 }
 
@@ -286,6 +408,30 @@ $DrawioExe = $DrawioExeCandidates | Where-Object { Test-Path $_ } | Select-Objec
 if (-not $DrawioExe) {
     Write-ToolkitMessage -Kind Error -Text "错误：未找到 draw.io Desktop（draw.io.exe），请先安装。"
     exit 1
+}
+
+# 输出目录只做路径计算与校验，不创建；创建在确认之后，保证取消时无副作用
+# 相对 -Output 以每个源文件所在目录为基准；绝对 -Output 统一使用；省略时输出到当前目录
+$OutputIsAbsolute = $false
+if ($PSBoundParameters.ContainsKey('Output')) {
+    if (-not $Output) {
+        Write-ToolkitMessage -Kind Error -Text "错误：输出目录不能为空"
+        exit 1
+    }
+    if ([IO.Path]::IsPathRooted($Output)) {
+        $OutputIsAbsolute = $true
+        $OutputDirs = @($Output)
+    } else {
+        $OutputDirs = @($DrawioFiles | ForEach-Object { Join-Path (Split-Path -Parent $_.FullName) $Output } | Sort-Object -Unique)
+    }
+    foreach ($Dir in $OutputDirs) {
+        if (Test-Path -LiteralPath $Dir -PathType Leaf) {
+            Write-ToolkitMessage -Kind Error -Text "错误：输出路径是文件而非目录：$Dir"
+            exit 1
+        }
+    }
+} else {
+    $OutputDirs = @($WorkDir)
 }
 
 # 互斥必须在确认和清理之前取得，防止两个 d2p 同时清理、互相干扰
@@ -303,6 +449,38 @@ if (-not (Confirm-DrawioCleanup)) {
     $ExportLock.ReleaseMutex()
     $ExportLock.Dispose()
     exit 0
+}
+
+# 确认后立即创建并验证输出目录，避免强杀 draw.io 之后才发现不可写
+if ($PSBoundParameters.ContainsKey('Output')) {
+    foreach ($Dir in $OutputDirs) {
+        if (-not (Test-Path -LiteralPath $Dir -PathType Container)) {
+            try {
+                New-Item -ItemType Directory -Path $Dir -Force -ErrorAction Stop | Out-Null
+            }
+            catch {
+                Write-ToolkitMessage -Kind Error -Text "错误：无法创建输出目录 $Dir（$($_.Exception.Message)）"
+                $ExportLock.ReleaseMutex()
+                $ExportLock.Dispose()
+                exit 1
+            }
+        }
+    }
+}
+
+# 测试输出目录写入权限
+foreach ($Dir in $OutputDirs) {
+    try {
+        $TestFile = Join-Path $Dir ".write_test_$([guid]::NewGuid().ToString('N')).tmp"
+        [System.IO.File]::WriteAllText($TestFile, "test")
+        Remove-Item $TestFile -Force
+    }
+    catch {
+        Write-ToolkitMessage -Kind Error -Text "错误：输出目录无写入权限: $Dir"
+        $ExportLock.ReleaseMutex()
+        $ExportLock.Dispose()
+        exit 1
+    }
 }
 
 # 确认后重新枚举，清理全部 draw.io（包括冻结、假死和半退出残留）
@@ -338,40 +516,12 @@ catch {
     exit 1
 }
 
-# 处理输出目录
-if ($OutputSubdir) {
-    $OutputDir = Join-Path $WorkDir $OutputSubdir
-
-    # 处理子目录重名：递增括号法
-    $Counter = 1
-    while (Test-Path $OutputDir -PathType Container) {
-        $OutputDir = Join-Path $WorkDir "$OutputSubdir($Counter)"
-        $Counter++
-    }
-
-    # 创建输出目录
-    if (-not (Test-Path $OutputDir)) {
-        New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-    }
+$FormatName = $Format.ToUpperInvariant()
+if ($OutputDirs.Count -eq 1) {
+    Write-Host "输出目录: $($OutputDirs[0])（格式：$FormatName）"
 } else {
-    $OutputDir = $WorkDir
+    Write-Host "输出目录: 各源文件所在目录下的 $Output（共 $($OutputDirs.Count) 处，格式：$FormatName）"
 }
-
-# 测试输出目录写入权限
-try {
-    $TestFile = Join-Path $OutputDir ".write_test_$([guid]::NewGuid().ToString('N')).tmp"
-    [System.IO.File]::WriteAllText($TestFile, "test")
-    Remove-Item $TestFile -Force
-}
-catch {
-    Write-ToolkitMessage -Kind Error -Text "错误：输出目录无写入权限: $OutputDir"
-    $ExportLock.ReleaseMutex()
-    $ExportLock.Dispose()
-    exit 1
-}
-
-$FormatName = if ($ToPng) { "PNG" } else { "PDF" }
-Write-Host "输出目录: $OutputDir（格式：$FormatName）"
 
 # 统计 .drawio 文件的页数（解析 XML 中 <diagram> 节点数量）
 function Get-DrawioPageCount {
@@ -688,12 +838,19 @@ function Invoke-DrawioPageWithRetry {
 $TotalCount = $DrawioFiles.Count
 $CurrentIndex = 0
 $script:BatchStopped = $false
-$Fmt = $FormatName.ToLower()
+$Fmt = $Format.ToLowerInvariant()
 
 foreach ($File in $DrawioFiles) {
     if ($script:BatchStopped) { break }
 
     $CurrentIndex++
+
+    # 相对 -Output 以该文件所在目录为基准；绝对 -Output 与省略时使用同一目录
+    $FileOutputDir = if ($Output -and -not $OutputIsAbsolute) {
+        Join-Path (Split-Path -Parent $File.FullName) $Output
+    } else {
+        $OutputDirs[0]
+    }
 
     # 显示进度
     Write-ProgressBar -Current $CurrentIndex -Total $TotalCount -CurrentFile $File.Name
@@ -702,7 +859,7 @@ foreach ($File in $DrawioFiles) {
         # 检测 DGS 密文：密文无法解析也无法被 draw.io 读取
         if (Test-DgsEncrypted -Path $File.FullName) {
             Write-ToolkitMessage -Kind Error -Text "    错误: DGS 透明加密文件，请先解密（可使用 dgs-decrypt）"
-            $FailedFiles += "$($File.Name) - DGS 透明加密文件"
+            $FailedFiles += "$($File.FullName) - DGS 透明加密文件"
             $FailCount++
             continue
         }
@@ -724,7 +881,7 @@ foreach ($File in $DrawioFiles) {
             } else {
                 $OutBaseName = "$($File.BaseName).$Fmt"
             }
-            $OutputPath = Get-UniqueFileName -Directory $OutputDir -BaseName $OutBaseName
+            $OutputPath = Get-UniqueFileName -Directory $FileOutputDir -BaseName $OutBaseName
 
             try {
                 Invoke-DrawioPageWithRetry -Executable $DrawioExe -Source $File.FullName `
@@ -735,7 +892,7 @@ foreach ($File in $DrawioFiles) {
             catch {
                 $ErrorMessage = $_.Exception.Message
                 Write-ToolkitMessage -Kind Error -Text "    错误: 第 $Page 页导出失败 - $ErrorMessage"
-                $FailedFiles += "$($File.Name) 第 $Page 页 - $ErrorMessage"
+                $FailedFiles += "$($File.FullName) 第 $Page 页 - $ErrorMessage"
                 $FailCount++
                 $FilePageFailCount++
                 if ($_.Exception.Data['StopBatch']) { $script:BatchStopped = $true }
@@ -750,7 +907,7 @@ foreach ($File in $DrawioFiles) {
     catch {
         $ErrorMessage = $_.Exception.Message
         Write-ToolkitMessage -Kind Error -Text "    错误: $ErrorMessage"
-        $FailedFiles += "$($File.Name) - $ErrorMessage"
+        $FailedFiles += "$($File.FullName) - $ErrorMessage"
         $FailCount++
     }
 }
@@ -759,7 +916,11 @@ foreach ($File in $DrawioFiles) {
 $UnprocessedFiles = if ($script:BatchStopped) { $TotalCount - $CurrentIndex } else { 0 }
 Write-Host ""
 Write-ToolkitMessage -Kind Info -Text "================ 结果统计 ================"
-Write-Host "输出目录: $OutputDir"
+if ($OutputDirs.Count -eq 1) {
+    Write-Host "输出目录: $($OutputDirs[0])"
+} else {
+    Write-Host "输出目录: 各源文件所在目录下的 $Output（共 $($OutputDirs.Count) 处）"
+}
 Write-Host "文件总数: $TotalCount"
 Write-ToolkitMessage -Kind Success -Text "成功数量: $SuccessCount（共导出 $PageCount 页）"
 if ($script:BatchStopped) {
