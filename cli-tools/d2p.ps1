@@ -33,9 +33,11 @@
 
 .PARAMETER Path
     指定要转换的 .drawio 文件，可提供多个，支持通配符与绝对/相对路径。
+    可省略 .drawio 扩展名，脚本会自动补齐（如 图1 等价于 图1.drawio）。
     省略时扫描当前目录下的全部 .drawio 文件。目录不作为输入。
     短参数：-p
     示例：d2p 图1.drawio
+    示例：d2p 图1
     示例：d2p *.drawio -f png
     示例：d2p -p "D:\资料\流程图.drawio"
 
@@ -75,7 +77,7 @@
 
 .EXAMPLE
     d2p -o pdfs
-    转换为 PDF 并输出到当前目录下的 pdfs 目录
+    转换当前目录下的文件，并输出到源文件所在目录下的 pdfs 目录
 
 .EXAMPLE
     d2p -p "D:\资料\界面\图.drawio" -o 界面
@@ -87,9 +89,10 @@
 
 .NOTES
     Author: SUNC
-    Version: 2.1.0
+    Version: 2.1.1
 
     变更记录：
+    2.1.1 (SUNC) — -Path/-p 可省略 .drawio 扩展名，脚本自动补齐。
     2.1.0 (SUNC) — -o 的相对路径改为以源文件所在目录为基准；多个源文件分处
                     不同目录时，各自在其目录下创建子目录。
     2.0.0 (SUNC) — -p 由“转 PNG”改为 -Path 别名；PNG 改用 -f png；
@@ -327,14 +330,30 @@ if ($Path) {
                 Write-ToolkitMessage -Kind Error -Text "错误：不支持目录输入 $Item，请指定 .drawio 文件"
                 exit 1
             }
-            # 字面路径优先：文件名含 [ ] 时按通配符展开会误匹配其他文件
-            $Resolved = if (Test-Path -LiteralPath $Item -PathType Leaf) {
-                @((Get-Item -LiteralPath $Item).FullName)
-            } else {
-                @(Resolve-Path -Path $Item -ErrorAction SilentlyContinue | ForEach-Object { $_.ProviderPath })
+
+            # 省略 .drawio 扩展名时自动补齐；已带扩展名则不重复尝试
+            $Candidates = @($Item)
+            if ($Item -notmatch '(?i)\.drawio$') {
+                $Candidates += "${Item}.drawio"
+            }
+
+            $Resolved = @()
+            foreach ($Candidate in $Candidates) {
+                if (Test-Path -LiteralPath $Candidate -PathType Container) {
+                    Write-ToolkitMessage -Kind Error -Text "错误：不支持目录输入 $Candidate，请指定 .drawio 文件"
+                    exit 1
+                }
+                # 字面路径优先：文件名含 [ ] 时按通配符展开会误匹配其他文件
+                $Resolved = if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+                    @((Get-Item -LiteralPath $Candidate).FullName)
+                } else {
+                    @(Resolve-Path -Path $Candidate -ErrorAction SilentlyContinue | ForEach-Object { $_.ProviderPath })
+                }
+                if ($Resolved.Count -gt 0) { break }
             }
             if ($Resolved.Count -eq 0) {
-                Write-ToolkitMessage -Kind Error -Text "错误：未找到路径 $Item（PNG 请用 -f png）"
+                $Hint = if ($Candidates.Count -gt 1) { "（也尝试过 ${Item}.drawio）" } else { '' }
+                Write-ToolkitMessage -Kind Error -Text "错误：未找到路径 $Item$Hint（PNG 请用 -f png）"
                 exit 1
             }
             $Matched = @()
