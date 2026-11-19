@@ -157,12 +157,17 @@ function Get-MptkProviderNames {
     return $map
 }
 
-# 安全读取一行 JSON 中的数值字段，缺失或为空时按 0。
+# 安全读取一行 JSON 中的数值字段，缺失、为空或非数值时按 0。
 function Get-MptkRowToken {
     param($Row, [string]$Name)
     $prop = $Row.PSObject.Properties[$Name]
-    if ($null -ne $prop -and $prop.Value) { return [double]$prop.Value }
-    return 0.0
+    if ($null -eq $prop -or -not $prop.Value) { return 0.0 }
+    try {
+        return [double]$prop.Value
+    }
+    catch {
+        return 0.0
+    }
 }
 
 # 读取 magpie 用量日志并输出当天统计。
@@ -184,13 +189,15 @@ function Get-MptkUsage {
         $providerNames = Get-MptkProviderNames -ProvidersPath $ProvidersPath
 
         # 共享读取：magpie 可能正在追加写入，不能独占打开
-        $stream = [System.IO.FileStream]::new(
-            $UsagePath,
-            [System.IO.FileMode]::Open,
-            [System.IO.FileAccess]::Read,
-            [System.IO.FileShare]::ReadWrite)
-        $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8)
+        $stream = $null
+        $reader = $null
         try {
+            $stream = [System.IO.FileStream]::new(
+                $UsagePath,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite)
+            $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8)
             while ($null -ne ($line = $reader.ReadLine())) {
                 if (-not $line.Trim()) { continue }
                 $row = try { $line | ConvertFrom-Json } catch { $null }
@@ -198,7 +205,13 @@ function Get-MptkUsage {
                 # 健康探测与模型列表请求不计入用量与请求数
                 if ([string]$row.source -eq 'probe' -or [string]$row.kind -eq 'model_list') { continue }
 
-                $local = try { [datetimeoffset]::Parse([string]$row.t).LocalDateTime } catch { $null }
+                $local = try {
+                    [datetimeoffset]::Parse(
+                        [string]$row.t,
+                        [System.Globalization.CultureInfo]::InvariantCulture,
+                        [System.Globalization.DateTimeStyles]::None).LocalDateTime
+                }
+                catch { $null }
                 if ($null -eq $local -or $local.Date -ne $today) { continue }
 
                 $inTokens = Get-MptkRowToken -Row $row -Name 'in'
@@ -220,9 +233,14 @@ function Get-MptkUsage {
                 $providerTotals[$name] += $rowTotal
             }
         }
+        catch [System.IO.IOException] {
+            throw "无法读取 magpie 用量文件：$UsagePath — $($_.Exception.Message)"
+        }
+        catch [System.UnauthorizedAccessException] {
+            throw "无权读取 magpie 用量文件：$UsagePath — $($_.Exception.Message)"
+        }
         finally {
-            $reader.Dispose()
-            $stream.Dispose()
+            if ($reader) { $reader.Dispose() } elseif ($stream) { $stream.Dispose() }
         }
     }
 
