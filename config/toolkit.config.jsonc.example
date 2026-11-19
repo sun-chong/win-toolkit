@@ -55,6 +55,9 @@
   // cctk：cc-switch 桌面应用可执行文件路径；支持 %LOCALAPPDATA% 等环境变量
   "CcSwitchExePath": "%LOCALAPPDATA%\\Programs\\CC Switch\\cc-switch.exe",
 
+  // mptk：magpie 桌面应用可执行文件路径；支持 %LOCALAPPDATA% 等环境变量
+  "MagpieExePath": "%LOCALAPPDATA%\\Programs\\magpie\\magpie.exe",
+
   // ==========================================================================
   // 项目专属路径
   // --------------------------------------------------------------------------

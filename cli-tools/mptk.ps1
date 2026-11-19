@@ -266,8 +266,15 @@ try {
     }
     $providersPath = Join-Path (Split-Path -Parent $usagePath) 'providers.json'
 
-    # magpie 可执行文件路径：支持 %LOCALAPPDATA% 等环境变量
-    $magpieExe = Resolve-ToolkitPathValue -Path '%LOCALAPPDATA%\Programs\magpie\magpie.exe'
+    # magpie 可执行文件路径：读跨脚本配置，支持 %LOCALAPPDATA% 等环境变量
+    $config = Get-ToolkitConfig
+    $magpieExe = if ($config.ContainsKey('MagpieExePath') -and $config.MagpieExePath) {
+        [string]$config.MagpieExePath
+    }
+    else {
+        '%LOCALAPPDATA%\Programs\magpie\magpie.exe'
+    }
+    $magpieExe = Resolve-ToolkitPathValue -Path $magpieExe
     $exeAvailable = Test-Path -LiteralPath $magpieExe
 
     $data = Get-MptkUsage -UsagePath $usagePath -ProvidersPath $providersPath
