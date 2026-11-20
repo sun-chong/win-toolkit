@@ -60,7 +60,7 @@ if ($Help) {
     return
 }
 
-$TokenColor = '#B380DA'
+$TokenColor = '#3DD935'
 $ChartColor = '#3577D9'
 $ChartFillColor = '#25508F'
 $MutedColor = '#8A8A92'
@@ -266,8 +266,10 @@ try {
     }
     $providersPath = Join-Path (Split-Path -Parent $usagePath) 'providers.json'
 
-    # magpie 可执行文件路径：支持 %LOCALAPPDATA% 等环境变量
-    $magpieExe = Resolve-ToolkitPathValue -Path '%LOCALAPPDATA%\Programs\magpie\magpie.exe'
+    # magpie 可执行文件路径：读跨脚本配置，支持 %LOCALAPPDATA% 等环境变量
+    $magpieExe = [string](Get-ToolkitConfig).MagpieExePath
+    if (-not $magpieExe) { $magpieExe = '%LOCALAPPDATA%\Programs\magpie\magpie.exe' }
+    $magpieExe = Resolve-ToolkitPathValue -Path $magpieExe
     $exeAvailable = Test-Path -LiteralPath $magpieExe
 
     $data = Get-MptkUsage -UsagePath $usagePath -ProvidersPath $providersPath
