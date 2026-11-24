@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "pwsh -NoProfile -File \".claude/hooks/ps1-parse-check.ps1\"",
+            "command": "pwsh -NoProfile -Command '& \"$env:CLAUDE_PROJECT_DIR/.claude/hooks/ps1-parse-check.ps1\"'",
             "timeout": 30,
             "statusMessage": "校验 PowerShell 语法"
           }
