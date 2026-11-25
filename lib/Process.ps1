@@ -264,6 +264,139 @@ function Invoke-WithTimeout {
     return Invoke-ChildProcess -Command $Command -TimeoutSeconds $TimeoutSeconds
 }
 
+function Start-ToolkitGuiProcess {
+    <#
+    .SYNOPSIS
+        启动 GUI 应用并把主窗口切到前台
+    .DESCRIPTION
+        以非阻塞方式启动可执行文件，轮询等待主窗口出现后强制把它切到前台。
+        从终端启动的 GUI 程序默认没有前台权限（Windows 前台锁），窗口常被压在
+        终端窗口之后；单实例应用还会让 Start-Process 返回的进程立刻退出、由已有
+        实例展示窗口，因此这里按进程名查找窗口，而不是只看新进程。
+    .PARAMETER FilePath
+        可执行文件路径
+    .PARAMETER ArgumentList
+        传给应用的参数数组
+    .PARAMETER WorkingDirectory
+        应用的工作目录
+    .PARAMETER ProcessName
+        定位窗口的进程名；省略时取 FilePath 的文件名
+    .PARAMETER TimeoutSeconds
+        等待主窗口出现的秒数，超时后不再尝试置前
+    .EXAMPLE
+        Start-ToolkitGuiProcess -FilePath "$env:LOCALAPPDATA\Programs\magpie\magpie.exe"
+        启动 magpie 并把窗口切到前台
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [string]$WorkingDirectory,
+        [string]$ProcessName,
+        [ValidateRange(0, 60)][int]$TimeoutSeconds = 10
+    )
+
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        throw "可执行文件不存在：$FilePath"
+    }
+    if (-not $ProcessName) {
+        $ProcessName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
+    }
+
+    $startParams = @{ FilePath = $FilePath; PassThru = $true }
+    if ($ArgumentList) { $startParams['ArgumentList'] = $ArgumentList }
+    if ($WorkingDirectory) { $startParams['WorkingDirectory'] = $WorkingDirectory }
+    $started = Start-Process @startParams
+
+    $process = $null
+    $handle = [IntPtr]::Zero
+    $deadline = (Get-Date).AddSeconds([math]::Max(1, $TimeoutSeconds))
+    while ($true) {
+        $candidate = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
+            Where-Object { try { $_.Refresh(); $_.MainWindowHandle.ToInt64() -ne 0 } catch { $false } } |
+            Sort-Object -Property StartTime -Descending |
+            Select-Object -First 1
+        if ($candidate) {
+            $process = $candidate
+            $handle = $candidate.MainWindowHandle
+            break
+        }
+        if ((Get-Date) -ge $deadline) { break }
+        Start-Sleep -Milliseconds 100
+    }
+
+    if ($handle.ToInt64() -ne 0) {
+        $null = Set-ToolkitForegroundWindow -Handle $handle
+    }
+
+    if ($process) { return $process }
+    return $started
+}
+
+function Set-ToolkitForegroundWindow {
+    <#
+    .SYNOPSIS
+        把指定窗口切到前台
+    .DESCRIPTION
+        先用 SW_RESTORE 还原最小化窗口，再临时附加到当前前台线程的输入队列，
+        以绕过 Windows 前台锁对 SetForegroundWindow 的限制，最后解除附加。
+    .PARAMETER Handle
+        窗口句柄
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][IntPtr]$Handle
+    )
+
+    if ($Handle.ToInt64() -eq 0) { return $false }
+
+    if (-not ('Win32.ToolkitWindow' -as [type])) {
+        Add-Type -Name ToolkitWindow -Namespace Win32 -MemberDefinition @"
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+"@
+    }
+
+    if ([Win32.ToolkitWindow]::IsIconic($Handle)) {
+        [void][Win32.ToolkitWindow]::ShowWindow($Handle, 9) # SW_RESTORE
+    }
+
+    $currentThread = [Win32.ToolkitWindow]::GetCurrentThreadId()
+    $foreground = [Win32.ToolkitWindow]::GetForegroundWindow()
+    $foregroundThread = [uint32]0
+    if ($foreground.ToInt64() -ne 0) {
+        [uint32]$foregroundPid = 0
+        $foregroundThread = [Win32.ToolkitWindow]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
+    }
+
+    # 附加到前台线程的输入队列后，本线程才被视为可设置前台的进程
+    $attached = $false
+    if ($foregroundThread -and $foregroundThread -ne $currentThread) {
+        $attached = [Win32.ToolkitWindow]::AttachThreadInput($currentThread, $foregroundThread, $true)
+    }
+    try {
+        [void][Win32.ToolkitWindow]::BringWindowToTop($Handle)
+        return [Win32.ToolkitWindow]::SetForegroundWindow($Handle)
+    }
+    finally {
+        if ($attached) {
+            [void][Win32.ToolkitWindow]::AttachThreadInput($currentThread, $foregroundThread, $false)
+        }
+    }
+}
+
 function Test-ExternalCommand {
     <#
     .SYNOPSIS

@@ -18,7 +18,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.0.0
+    Version: 1.0.1
 #>
 
 param(
@@ -365,7 +365,8 @@ try {
     if ($exeAvailable -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
         $answer = Read-Host '打开 magpie？（y/N）'
         if ($answer -match '^\s*[yY]\s*$') {
-            Start-Process -FilePath $magpieExe
+            # 显式置前：从终端启动的 GUI 默认没有前台权限，窗口会被压在终端之后
+            $null = Start-ToolkitGuiProcess -FilePath $magpieExe
         }
     }
     elseif (-not $exeAvailable) {
