@@ -1751,6 +1751,13 @@ function Invoke-AsItem {
             try {
                 # 与 vsc 相同：在当前控制台调用 code -n，由 VS Code 打开新窗口
                 $null = & code -n $target
+                if ($LASTEXITCODE -ne 0) {
+                    return [PSCustomObject]@{
+                        Success = $false
+                        Message = "code 命令退出码 $($LASTEXITCODE)，未能打开：$target"
+                        Warning = ''
+                    }
+                }
             } catch {
                 return [PSCustomObject]@{
                     Success = $false
