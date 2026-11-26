@@ -11,6 +11,14 @@ function Add-ToolkitVsCodeRecentPath {
         已出现路径的小写键集合（会被就地修改）
     .PARAMETER Directories
         结果列表，元素为 Name / Path（会被就地修改）
+    .OUTPUTS
+        无；结果通过 -Directories 列表就地追加
+    .EXAMPLE
+        Add-ToolkitVsCodeRecentPath -Uri 'file:///c%3A/Users/me/project' -Seen $seen -Directories $list
+        把目录追加到列表；重复路径直接跳过
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
     #>
     param(
         [string]$Uri,

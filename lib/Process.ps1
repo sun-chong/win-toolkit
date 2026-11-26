@@ -279,6 +279,12 @@ function Find-ToolkitWindowProcess {
         主窗口标题必须包含的子串；省略时不按标题过滤
     .OUTPUTS
         System.Diagnostics.Process；没有匹配时返回 $null
+    .EXAMPLE
+        $process = Find-ToolkitWindowProcess -ProcessName 'notepad'
+        返回记事本最新一个拥有主窗口的进程；没有匹配时返回 $null
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
     #>
     param(
         [Parameter(Mandatory = $true)][string]$ProcessName,

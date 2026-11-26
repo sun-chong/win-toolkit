@@ -1,6 +1,6 @@
 @{
     RootModule        = 'Toolkit.psm1'
-    ModuleVersion     = '1.16.0'
+    ModuleVersion     = '1.16.1'
     GUID              = 'bdd5cca1-7198-44bb-b0d5-41f864674d01'
     Author            = 'SUNC'
     Description       = 'toolkit 公共库：路径、配置、输出、帮助、进程、代理与文件工具'

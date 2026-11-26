@@ -37,8 +37,8 @@
     启动配置的短名或路径
     短参数：-c
     短名与相对路径都相对 cli-tools 目录解析；短名的 .config 与 .jsonc/.json 后缀可省略。
-    含分隔符或盘符的路径先展开环境变量并解析为绝对路径：该路径本身是存在的文件时
-    直接使用（不要求 .config 命名，支持 C:\cfg\foo.json 等任意 JSON/JSONC 文件）；
+    含分隔符或盘符的路径先展开环境变量并解析为绝对路径：该路径本身是存在的
+    .json/.jsonc 文件时直接使用（不要求 .config 命名，如 C:\cfg\foo.json）；
     否则再按命名配置规则剥 .jsonc/.json 与 .config，补 .config 后探测扩展名。
     示例：-c as-shopee、-c as-shopee.config、-c as-shopee.config.jsonc、
           -c .\as-shopee.config.jsonc、-c C:\configs\foo.json
@@ -74,7 +74,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.5.2
+    Version: 1.5.3
 #>
 
 param(
@@ -112,8 +112,8 @@ $helpSections = @(
     @{ Title = '启动配置'; Lines = @(
         '默认读取 cli-tools\as.config.jsonc（兼容 .json）；命名配置以 as- 开头。'
         '-c 的短名与相对路径都在 cli-tools 目录下解析，短名的 .config 与 .jsonc/.json 后缀可省略。'
-        '含分隔符或盘符的路径先展开环境变量并解析为绝对路径：该路径本身是存在的文件时直接使用，'
-        '不要求 .config 命名（C:\cfg\foo.json 或任意 JSON/JSONC 文件均可）；否则再按命名规则补 .config 探测。'
+        '含分隔符或盘符的路径先展开环境变量并解析为绝对路径：该路径本身是存在的 .json/.jsonc 文件时直接使用，'
+        '不要求 .config 命名（如 C:\cfg\foo.json）；其他扩展名或不存在时再按命名规则补 .config 探测。'
         '顶层字段：delayMs（默认间隔，默认 1000 毫秒）、items（启动清单）。'
         '未知顶层字段只警告；配置缺失或 JSON/顶层结构错误时直接退出 1。'
     ) }
@@ -187,9 +187,9 @@ function Resolve-AsConfigInfo {
         无 -c 时使用默认配置 as.config。
 
         含路径分隔符或以盘符开头的值按路径处理：先展开环境变量，相对路径相对
-        cli-tools 目录解析为绝对路径；该路径本身是存在的文件时直接使用，不要求
-        .config 命名（任意 JSON/JSONC 文件均可）。路径不存在为文件时，再按命名
-        配置规则剥掉 .jsonc/.json 与 .config 后缀，统一补回 .config，交由
+        cli-tools 目录解析为绝对路径；该路径本身是存在的 .json/.jsonc 文件时
+        直接使用，不要求 .config 命名。路径不存在或扩展名不符时，再按命名配置
+        规则剥掉 .jsonc/.json 与 .config 后缀，统一补回 .config，交由
         Resolve-ToolkitConfigPath 探测扩展名（优先 .jsonc）。
 
         不含分隔符与盘符的短名规则不变：同样剥后缀并补 .config，在 cli-tools
@@ -213,8 +213,9 @@ function Resolve-AsConfigInfo {
         }
         try { $pathValue = [System.IO.Path]::GetFullPath($pathValue) } catch { $null = $_ }
 
-        # 路径本身指向存在的文件：直接使用，支持任意文件名与 JSON/JSONC 扩展名
-        if (Test-Path -LiteralPath $pathValue -PathType Leaf) {
+        # 路径本身指向存在的 .json/.jsonc 文件：直接使用，不要求 .config 命名
+        $extension = [System.IO.Path]::GetExtension($pathValue).ToLowerInvariant()
+        if ($extension -in @('.json', '.jsonc') -and (Test-Path -LiteralPath $pathValue -PathType Leaf)) {
             return [PSCustomObject]@{
                 Path      = $pathValue
                 Exists    = $true
@@ -1532,6 +1533,26 @@ function Get-AsItemDetail {
 # 节奏引擎
 # ============================================================
 
+function Test-AsSleepItem {
+    <#
+    .SYNOPSIS
+        判断启动项是否为校验有效的休眠项
+    .DESCRIPTION
+        只有校验有效的 sleep 项才会执行等待并替代相邻默认间隔；
+        校验失败的 sleep 项按普通项处理。
+    .PARAMETER Item
+        启动项模型
+    .OUTPUTS
+        System.Boolean
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
+    #>
+    param([object]$Item)
+
+    return ($Item.Type -eq 'sleep' -and $Item.Status -eq 'Valid')
+}
+
 function Get-AsIntervalMs {
     <#
     .SYNOPSIS
@@ -1553,8 +1574,8 @@ function Get-AsIntervalMs {
         [int]$DefaultDelayMs
     )
 
-    $previousSleep = $Previous.Type -eq 'sleep' -and $Previous.Status -eq 'Valid'
-    $nextSleep = $Next.Type -eq 'sleep' -and $Next.Status -eq 'Valid'
+    $previousSleep = Test-AsSleepItem -Item $Previous
+    $nextSleep = Test-AsSleepItem -Item $Next
     if ($previousSleep -or $nextSleep) { return 0 }
     if ($null -ne $Previous.DelayMs) { return [int]$Previous.DelayMs }
     return $DefaultDelayMs
@@ -1574,8 +1595,8 @@ function Get-AsIntervalDescription {
         [int]$DefaultDelayMs
     )
 
-    $previousSleep = $Previous.Type -eq 'sleep' -and $Previous.Status -eq 'Valid'
-    $nextSleep = $Next.Type -eq 'sleep' -and $Next.Status -eq 'Valid'
+    $previousSleep = Test-AsSleepItem -Item $Previous
+    $nextSleep = Test-AsSleepItem -Item $Next
     if ($previousSleep -and $nextSleep) {
         return '0 毫秒（两个休眠项相邻，无额外间隔）'
     }
