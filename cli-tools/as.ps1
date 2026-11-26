@@ -8,12 +8,19 @@
     一次运行只使用一份启动配置。
 
     本版本实现 app（名称启动/路径启动）、url（默认浏览器多标签）、folder（用资源
-    管理器打开目录）与 sleep（显式等待）四类启动项；command、vscode 完成解析与校验
-    后标记为失败，并提示该类型将在后续工单实现。url 读取系统默认浏览器可执行文件，
-    把该项全部网址一次性作为参数交给浏览器，使多个网址在同一窗口以多标签打开；
-    解析不到默认浏览器时退化为逐个打开网址，不算失败。名称启动先按快捷方式文件名
-    精确匹配，无精确命中时改用子串匹配；无命中或多候选时该项失败。单个启动项失败
-    不会中断清单，结束时给出成功/失败汇总并按结果设置退出码。
+    管理器打开目录）、command（默认终端标签组执行）与 sleep（显式等待）五类启动项；
+    vscode 完成解析与校验后标记为失败，并提示该类型将在后续工单实现。url 读取系统
+    默认浏览器可执行文件，把该项全部网址一次性作为参数交给浏览器，使多个网址在同一
+    窗口以多标签打开；解析不到默认浏览器时退化为逐个打开网址，不算失败。名称启动先按
+    快捷方式文件名精确匹配，无精确命中时改用子串匹配；无命中或多候选时该项失败。
+
+    command 先读 HKCU:\Console\%%Startup 判定系统默认终端：登记为 Windows Terminal
+    且 wt.exe 可用时支持标签，所有未标记 newTab 的命令按配置顺序并入同一标签组，在
+    第一个非 newTab 命令项处一次性提交给同一个 pwsh 会话，不同 cwd 用 Set-Location
+    串联；newTab: true 的命令各自独占一个标签。默认终端不支持标签（含 conhost 与未知
+    第三方终端）时，默认组改为在同一个新窗口内顺序执行，newTab 命令各自新窗口。
+    keepOpen 默认 true，组内任一项为 true 即保留终端，全部为 false 才在命令结束后
+    关闭。单个启动项失败不会中断清单，结束时给出成功/失败汇总并按结果设置退出码。
 
 .PARAMETER Config
     启动配置的短名或路径
@@ -24,7 +31,8 @@
 
 .PARAMETER DryRun
     只打印解析计划与每项间隔规则（app 显示命中的快捷方式与目标路径，
-    url 显示默认浏览器可执行文件与网址清单），不启动任何程序、不写日志
+    url 显示默认浏览器可执行文件与网址清单，command 显示默认终端判定与
+    标签组划分），不启动任何程序、不写日志
 
 .PARAMETER SkipTopMost
     跳过置顶阶段；置顶由后续工单实现，本版本无实际效果
@@ -51,7 +59,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.2.0
+    Version: 1.3.0
 #>
 
 param(
@@ -82,7 +90,7 @@ $helpSections = @(
         'as                              执行默认启动配置 as.config'
         'as -c as-shopee                 执行命名启动配置（短名/带 .config/完整文件名均可）'
         'as -c .\as-shopee.config.jsonc  按路径指定启动配置（相对路径相对 cli-tools 目录）'
-        'as -DryRun                      只打印解析计划（含 app 命中与 url 浏览器），不启动程序、不写日志'
+        'as -DryRun                      只打印解析计划（含默认终端与标签组划分），不启动程序、不写日志'
         'as -SkipTopMost                 跳过置顶阶段（置顶由后续工单实现）'
         'as -h                           显示帮助信息'
     ) }
@@ -96,12 +104,19 @@ $helpSections = @(
         'app      name 或 path（二者互斥）              名称启动/路径启动（本版本已实现）'
         'url      urls（字符串或字符串数组）            默认浏览器多标签（本版本已实现）'
         'folder   path                                  资源管理器打开目录（本版本已实现）'
-        'command  command，可选 cwd/newTab/keepOpen     默认终端执行（后续工单实现）'
+        'command  command，可选 cwd/newTab/keepOpen     默认终端标签组执行（本版本已实现）'
         'vscode   path 或 name（二者互斥）              VS Code 打开项目（后续工单实现）'
         'sleep    ms（正整数）                          显式等待（本版本已实现）'
         'url 读取 HKCU 的 http UserChoice ProgId 与对应 shell\open\command，解析系统默认浏览器；'
         '解析成功时把该项全部网址一次性交给浏览器，多个网址在同一窗口以多标签打开；'
         '解析失败时退化为逐个打开网址（与 op 一致），DryRun 提示“将退化为逐个打开”，不算失败。'
+        'command 先读 HKCU:\Console\%%Startup 判定默认终端：登记为 Windows Terminal 且 wt.exe 可用时支持标签；'
+        '支持标签时所有未标记 newTab 的命令并入默认标签组，在第一个非 newTab 命令项处一次性提交给同一个 pwsh 会话，'
+        '按配置顺序执行，不同 cwd 用 Set-Location 串联；newTab: true 的命令各自独占一个标签。'
+        '不支持标签时默认组改为同一新窗口内顺序执行，newTab 命令各自新窗口。'
+        '后续非 newTab 命令项到位置时只记录“已并入标签组”，不再启动新终端；组内命令连续执行，不受 delayMs 影响，'
+        '但每个 command 项仍按清单位置参与相邻间隔。'
+        'keepOpen 默认 true（保留终端），组内任一项为 true 即保留，全部为 false 才在命令结束后关闭。'
         '公共可选字段：delayMs（覆盖本项之后的间隔）、topMost（仅 app/vscode，置顶由后续工单实现）。'
         '休眠项不接受 delayMs/topMost，出现时警告并忽略。'
         '名称启动扫描用户与机器开始菜单的 .lnk：快捷方式文件名精确匹配优先，否则子串匹配；'
@@ -913,6 +928,360 @@ function Initialize-AsUrlTargets {
     }
 }
 
+# ============================================================
+# 默认终端与标签组（command 启动项）
+# ============================================================
+
+function Get-AsNormalizedClsid {
+    <#
+    .SYNOPSIS
+        把注册表中的 CLSID 文本归一化为不带大括号的大写 GUID
+    .DESCRIPTION
+        默认终端登记值可能带大括号；空值与纯空白返回空字符串，
+        便于统一比较与显示。
+    .PARAMETER Value
+        注册表原始值
+    .OUTPUTS
+        归一化 CLSID 文本；无法解析时为空字符串
+    #>
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+    $trimmed = $Value.Trim()
+    if ($trimmed.Length -ge 2 -and $trimmed.StartsWith('{') -and $trimmed.EndsWith('}')) {
+        $trimmed = $trimmed.Substring(1, $trimmed.Length - 2)
+    }
+    return $trimmed.ToUpperInvariant()
+}
+
+function Get-AsDefaultTerminalInfo {
+    <#
+    .SYNOPSIS
+        判定系统默认终端是否支持标签
+    .DESCRIPTION
+        读取 HKCU:\Console\%%Startup 的 DelegationConsole / DelegationTerminal，
+        与 Windows Terminal、conhost 的已知 CLSID 比较；全零 GUID 视为未设置。
+        只有登记为 Windows Terminal 且 wt.exe 可用时才按支持标签处理；
+        conhost、未设置与未知第三方终端都按不支持标签（conhost 语义）处理。
+        同一次运行只调用一次，DryRun 与执行共用结果。
+    .OUTPUTS
+        PSCustomObject：SupportsTabs / Kind / DisplayName / Detail / WtPath
+    #>
+    $wtConsoleClsid = '2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69'
+    $wtTerminalClsid = 'E12CFF52-A866-4C77-9A90-F570A7AA2C6B'
+    $conhostClsid = 'B23D10C0-E52E-411E-9D5B-C09FDF709C7D'
+    $nullClsid = '00000000-0000-0000-0000-000000000000'
+
+    $readError = ''
+    $rawConsole = ''
+    $rawTerminal = ''
+    try {
+        $startup = Get-ItemProperty -LiteralPath 'HKCU:\Console\%%Startup' -ErrorAction Stop
+        $rawConsole = [string]$startup.DelegationConsole
+        $rawTerminal = [string]$startup.DelegationTerminal
+    } catch {
+        $readError = $_.Exception.Message
+    }
+
+    $consoleClsid = Get-AsNormalizedClsid -Value $rawConsole
+    $terminalClsid = Get-AsNormalizedClsid -Value $rawTerminal
+    $consoleSet = -not [string]::IsNullOrWhiteSpace($consoleClsid) -and $consoleClsid -ne $nullClsid
+    $terminalSet = -not [string]::IsNullOrWhiteSpace($terminalClsid) -and $terminalClsid -ne $nullClsid
+
+    $wtRegistered = ($consoleSet -and $consoleClsid -eq $wtConsoleClsid) -or
+        ($terminalSet -and $terminalClsid -eq $wtTerminalClsid)
+    $conhostRegistered = ($consoleSet -and $consoleClsid -eq $conhostClsid) -or
+        ($terminalSet -and $terminalClsid -eq $conhostClsid)
+
+    $wtCommand = Get-Command -Name 'wt' -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    $wtPath = if ($wtCommand -and $wtCommand.Source) { [string]$wtCommand.Source } else { '' }
+    $wtAvailable = -not [string]::IsNullOrWhiteSpace($wtPath)
+
+    $supportsTabs = $wtRegistered -and $wtAvailable
+
+    $consoleText = if (-not $consoleSet) { '未设置' } else { $consoleClsid }
+    $terminalText = if (-not $terminalSet) { '未设置' } else { $terminalClsid }
+    $wtText = if ($wtAvailable) { '可用' } else { '不可用' }
+    $detail = "DelegationConsole=$consoleText；DelegationTerminal=$terminalText；wt.exe $wtText"
+
+    if ($supportsTabs) {
+        $kind = 'WindowsTerminal'
+        $displayName = 'Windows Terminal'
+    } else {
+        $displayName = '无标签终端'
+        if ($wtRegistered) {
+            $kind = 'WindowsTerminalUnavailable'
+            $detail += '；已登记 Windows Terminal 但 wt.exe 不可用，按无标签终端处理'
+        } elseif ($conhostRegistered -or (-not $consoleSet -and -not $terminalSet -and -not $readError)) {
+            $kind = 'Conhost'
+        } else {
+            $kind = 'Unknown'
+        }
+    }
+    if ($readError) {
+        $detail += "；读取 HKCU:\Console\%%Startup 失败：$readError"
+    }
+
+    return [PSCustomObject]@{
+        SupportsTabs = $supportsTabs
+        Kind         = $kind
+        DisplayName  = $displayName
+        Detail       = $detail
+        WtPath       = $wtPath
+    }
+}
+
+function Get-AsPwshExecutable {
+    <#
+    .SYNOPSIS
+        获取执行 command 启动项用的 pwsh 可执行文件路径
+    .DESCRIPTION
+        优先取当前进程路径（要求文件名是 pwsh.exe）；当前进程不是 pwsh 时
+        回退到 Get-Command pwsh。均找不到时返回空字符串，由启动组报告失败。
+    .OUTPUTS
+        可执行文件完整路径；找不到时为空字符串
+    #>
+    $current = ''
+    try {
+        $current = [string](Get-Process -Id $PID -ErrorAction Stop).Path
+    } catch {
+        $current = ''
+    }
+    if ($current -and [System.IO.Path]::GetFileName($current) -ieq 'pwsh.exe') {
+        return $current
+    }
+
+    $command = Get-Command -Name 'pwsh' -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($command -and $command.Source) { return [string]$command.Source }
+    return ''
+}
+
+function ConvertTo-AsSingleQuotedLiteral {
+    <#
+    .SYNOPSIS
+        把字符串转换为 PowerShell 单引号字面量
+    .DESCRIPTION
+        单引号内的单引号以两个单引号转义，避免路径中的特殊字符被解释。
+    .PARAMETER Value
+        要转换的字符串
+    #>
+    param([string]$Value)
+    return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function ConvertTo-AsEncodedCommandScript {
+    <#
+    .SYNOPSIS
+        把脚本转换为 -EncodedCommand 需要的 UTF-16LE Base64
+    .PARAMETER Script
+        要编码的脚本文本
+    #>
+    param([string]$Script)
+    return [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Script))
+}
+
+function New-AsCommandGroup {
+    <#
+    .SYNOPSIS
+        创建一个标签组对象
+    .PARAMETER Kind
+        Default（未标记 newTab 的合并组）或 NewTab（独占标签）
+    .PARAMETER Anchor
+        组的首项；默认组中它决定组的创建位置
+    .OUTPUTS
+        PSCustomObject：Kind / Anchor / Items / FirstCwd / KeepOpen / Success / Message
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Default', 'NewTab')]
+        [string]$Kind,
+        [Parameter(Mandatory = $true)][object]$Anchor
+    )
+
+    $firstCwd = ''
+    if ($Anchor.Data.ContainsKey('Cwd') -and -not [string]::IsNullOrWhiteSpace([string]$Anchor.Data.Cwd)) {
+        $firstCwd = [string]$Anchor.Data.Cwd
+    }
+
+    return [PSCustomObject]@{
+        Kind     = $Kind
+        Anchor   = $Anchor
+        Items    = @($Anchor)
+        FirstCwd = $firstCwd
+        KeepOpen = $false
+        Success  = $null
+        Message  = ''
+    }
+}
+
+function Initialize-AsCommandGroups {
+    <#
+    .SYNOPSIS
+        把有效 command 启动项划分为标签组并写回各项模型
+    .DESCRIPTION
+        所有未标记 newTab 的命令合并为一个默认组，默认组以第一个非 newTab
+        命令项为首项（创建位置）；每个 newTab: true 的命令各自成组。
+        组级 keepOpen 取组内任一项的值（任一项为 true 即保留终端）。
+        每项的 Data.CommandGroup 指向所属组，DryRun 与执行共用该划分。
+    .PARAMETER Items
+        启动项模型数组（就地修改）
+    #>
+    param([object[]]$Items)
+
+    $defaultGroup = $null
+    $groups = @()
+
+    foreach ($item in $Items) {
+        if ($item.Type -ne 'command' -or $item.Status -ne 'Valid') { continue }
+
+        if ([bool]$item.Data.NewTab) {
+            $group = New-AsCommandGroup -Kind 'NewTab' -Anchor $item
+            $groups += $group
+        } else {
+            if (-not $defaultGroup) {
+                $defaultGroup = New-AsCommandGroup -Kind 'Default' -Anchor $item
+                $groups += $defaultGroup
+            } else {
+                $defaultGroup.Items = @($defaultGroup.Items) + @($item)
+            }
+            $group = $defaultGroup
+        }
+        $item.Data.CommandGroup = $group
+    }
+
+    foreach ($group in $groups) {
+        $keepOpen = $false
+        foreach ($member in $group.Items) {
+            if ($member.Data.ContainsKey('KeepOpen') -and [bool]$member.Data.KeepOpen) {
+                $keepOpen = $true
+                break
+            }
+        }
+        $group.KeepOpen = $keepOpen
+    }
+}
+
+function Get-AsCommandGroupScript {
+    <#
+    .SYNOPSIS
+        把一个标签组内的命令按配置顺序拼接成单段 pwsh 脚本
+    .DESCRIPTION
+        组首项的工作目录由启动时的工作目录参数设置，脚本只在 cwd 与当前
+        目录不同时插入 Set-Location -LiteralPath（单引号字面量转义）；
+        未指定 cwd 的命令沿用前一条命令的目录。命令之间用换行分隔。
+    .PARAMETER Group
+        标签组对象
+    .OUTPUTS
+        可直接交给 -EncodedCommand 的脚本文本
+    #>
+    param([Parameter(Mandatory = $true)][object]$Group)
+
+    $lines = @()
+    $currentCwd = if ($Group.FirstCwd) { [string]$Group.FirstCwd } else { $null }
+    foreach ($item in $Group.Items) {
+        $cwd = ''
+        if ($item.Data.ContainsKey('Cwd') -and -not [string]::IsNullOrWhiteSpace([string]$item.Data.Cwd)) {
+            $cwd = [string]$item.Data.Cwd
+        }
+        if ($cwd -and $cwd -ne $currentCwd) {
+            $lines += ('Set-Location -LiteralPath ' + (ConvertTo-AsSingleQuotedLiteral -Value $cwd))
+            $currentCwd = $cwd
+        }
+        $lines += [string]$item.Data.Command
+    }
+    return ($lines -join "`n")
+}
+
+function Invoke-AsCommandGroup {
+    <#
+    .SYNOPSIS
+        启动一个标签组；支持标签时用 wt 新建标签，否则用 pwsh 新窗口
+    .DESCRIPTION
+        组内全部命令一次性拼进同一个 pwsh 会话，经 -EncodedCommand 传入。
+        支持标签时执行 wt -w 0 new-tab [-d 首项工作目录] -- pwsh -NoProfile
+        [-NoExit] -EncodedCommand <base64>；不支持标签时用 Start-Process 启动
+        pwsh 新窗口并设置工作目录。组内任一项 keepOpen 为 true 即加 -NoExit。
+        所有启动都不阻塞等待；启动失败把组标记为失败，组内所有项由调用方记为失败。
+    .PARAMETER Group
+        标签组对象；函数会写入 Success 与 Message
+    .OUTPUTS
+        PSCustomObject：Success / Message / Warning
+    #>
+    param([Parameter(Mandatory = $true)][object]$Group)
+
+    $memberIndexes = @($Group.Items | ForEach-Object { $_.Index }) -join '、'
+    $keepOpen = [bool]$Group.KeepOpen
+    $terminalInfo = $script:AsTerminalInfo
+    $supportsTabs = $false
+    $wtPath = ''
+    if ($terminalInfo) {
+        $supportsTabs = [bool]$terminalInfo.SupportsTabs
+        $wtPath = [string]$terminalInfo.WtPath
+    }
+
+    $Group.Success = $false
+    $Group.Message = ''
+
+    $pwshPath = [string]$script:AsPwshExecutable
+    if ([string]::IsNullOrWhiteSpace($pwshPath)) {
+        $Group.Message = '未找到 pwsh 可执行文件；无法执行命令'
+        return [PSCustomObject]@{ Success = $false; Message = $Group.Message; Warning = '' }
+    }
+
+    $scriptText = Get-AsCommandGroupScript -Group $Group
+    $encodedCommand = ConvertTo-AsEncodedCommandScript -Script $scriptText
+
+    if ($supportsTabs) {
+        $modeText = if ($Group.Kind -eq 'Default') { 'Windows Terminal 默认标签组' } else { 'Windows Terminal 独占标签' }
+    } else {
+        $modeText = if ($Group.Kind -eq 'Default') { '同一新窗口' } else { '独占新窗口' }
+    }
+    $locationText = if ($Group.FirstCwd) { $Group.FirstCwd } else { '未指定' }
+    $keepText = if ($keepOpen) { '是' } else { '否' }
+
+    try {
+        if ($supportsTabs) {
+            if ([string]::IsNullOrWhiteSpace($wtPath)) {
+                throw '已判定支持标签，但未找到 wt.exe'
+            }
+            # wt 的参数含路径空格时必须自行加引号；-w 0 在已有窗口时加标签，否则新建窗口
+            $wtArguments = '-w 0 new-tab'
+            if ($Group.FirstCwd) {
+                $wtArguments += ' -d "' + $Group.FirstCwd.Replace('"', '""') + '"'
+            }
+            $wtArguments += ' -- "' + $pwshPath.Replace('"', '""') + '" -NoProfile'
+            if ($keepOpen) { $wtArguments += ' -NoExit' }
+            $wtArguments += ' -EncodedCommand ' + $encodedCommand
+            Start-Process -FilePath $wtPath -ArgumentList $wtArguments -ErrorAction Stop
+        } else {
+            $pwshArguments = @('-NoProfile')
+            if ($keepOpen) { $pwshArguments += '-NoExit' }
+            $pwshArguments += @('-EncodedCommand', $encodedCommand)
+            $startParams = @{
+                FilePath     = $pwshPath
+                ArgumentList = $pwshArguments
+                ErrorAction  = 'Stop'
+            }
+            if ($Group.FirstCwd) { $startParams['WorkingDirectory'] = $Group.FirstCwd }
+            Start-Process @startParams
+        }
+
+        $Group.Success = $true
+        $Group.Message = "已在 $modeText 启动 $($Group.Items.Count) 个命令（启动项 [$memberIndexes]；工作目录：$locationText；保留终端：$keepText）"
+    } catch {
+        $Group.Success = $false
+        $Group.Message = "启动 $modeText 失败：$($_.Exception.Message)"
+    }
+
+    return [PSCustomObject]@{
+        Success = [bool]$Group.Success
+        Message = [string]$Group.Message
+        Warning = ''
+    }
+}
+
 function Get-AsItemDetail {
     <#
     .SYNOPSIS
@@ -1070,14 +1439,16 @@ function Invoke-AsItem {
     .SYNOPSIS
         执行单个启动项
     .DESCRIPTION
-        本版本执行 app、url、folder 与 sleep；command、vscode 返回失败并提示后续工单实现。
+        本版本执行 app、url、folder、command 与 sleep；vscode 返回失败并提示后续工单实现。
         url 解析到默认浏览器时把全部网址一次性交给浏览器（同一窗口多标签）；
         解析不到时退化为逐个 Start-Process（与 op 一致），结果 Message 标注退化。
+        command 只在其标签组首项位置启动整组；同组后续项到位置时读取组结果：
+        组成功则记为“已并入标签组”，组失败则同组所有项都记为失败。
         app 启动后轮询等待主窗口最多 10 秒（不抢焦点），超时仍记为成功，
         由 Warning 字段提示调用方输出警告。
         返回 PSCustomObject：Success / Message / Warning。
     .PARAMETER Item
-        已校验且 app 项已完成目标解析的启动项模型
+        已校验且 app 项已完成目标解析、command 项已归属标签组的启动项模型
     #>
     param([object]$Item)
 
@@ -1173,6 +1544,31 @@ function Invoke-AsItem {
             }
             return [PSCustomObject]@{ Success = $true; Message = $message; Warning = $warning }
         }
+        'command' {
+            $group = if ($Item.Data.ContainsKey('CommandGroup')) { $Item.Data.CommandGroup } else { $null }
+            if (-not $group) {
+                return [PSCustomObject]@{ Success = $false; Message = '命令项未归入标签组'; Warning = '' }
+            }
+
+            if ([object]::ReferenceEquals($group.Anchor, $Item)) {
+                return (Invoke-AsCommandGroup -Group $group)
+            }
+
+            if ($group.Success -eq $true) {
+                return [PSCustomObject]@{
+                    Success = $true
+                    Message = "已并入标签组（首项 [$($group.Anchor.Index)]，随该组一起启动）"
+                    Warning = ''
+                }
+            }
+
+            $reason = if ([string]::IsNullOrWhiteSpace([string]$group.Message)) {
+                '同一标签组未成功启动'
+            } else {
+                "同一标签组启动失败：$($group.Message)"
+            }
+            return [PSCustomObject]@{ Success = $false; Message = $reason; Warning = '' }
+        }
         default {
             return [PSCustomObject]@{ Success = $false; Message = '该类型将在后续工单实现'; Warning = '' }
         }
@@ -1187,7 +1583,9 @@ function Show-AsDryRun {
         逐项打印序号、类型与解析结果；app 显示命中的快捷方式与目标路径
         （或路径启动解析后的路径），url 显示默认浏览器与网址清单（解析失败时
         提示将退化为逐个打开，不算失败），folder 显示展开后的路径，
-        sleep 显示毫秒数，command/vscode 显示配置摘要并标注尚未实现。
+        sleep 显示毫秒数，vscode 显示配置摘要并标注尚未实现。
+        command 显示默认终端判定，并按标签组打印成员序号、组工作目录与 keepOpen；
+        默认组首项列出全部成员，其余成员标注“已并入标签组”，newTab 项标注独占标签/窗口。
         返回校验失败（含 app 解析失败与目录不存在）的项数，供调用方决定退出码。
     .PARAMETER Items
         启动项模型数组
@@ -1197,17 +1595,31 @@ function Show-AsDryRun {
         当前使用的启动配置路径
     .PARAMETER SkipTopMostStage
         是否由 -SkipTopMost 跳过置顶阶段
+    .PARAMETER TerminalInfo
+        Get-AsDefaultTerminalInfo 的判定结果；省略时只打印“未判定”
     #>
     param(
         [object[]]$Items,
         [int]$DefaultDelayMs,
         [string]$ConfigPath,
-        [bool]$SkipTopMostStage
+        [bool]$SkipTopMostStage,
+        [object]$TerminalInfo
     )
 
     Write-ToolkitMessage -Kind Info -Text "启动配置：$ConfigPath"
     Write-ToolkitMessage -Kind Info -Text "启动项：$($Items.Count) 个；默认间隔：$DefaultDelayMs 毫秒"
     Write-ToolkitMessage -Kind Muted -Text '模式：DryRun（不启动任何程序、不写日志）'
+    if ($TerminalInfo) {
+        $terminalText = if ($TerminalInfo.SupportsTabs) {
+            'Windows Terminal（支持标签）'
+        } else {
+            '无标签终端（不支持标签）'
+        }
+        Write-ToolkitMessage -Kind Info -Text "默认终端：$terminalText"
+        Write-ToolkitMessage -Kind Muted -Text "    判定依据：$($TerminalInfo.Detail)"
+    } else {
+        Write-ToolkitMessage -Kind Muted -Text '默认终端：未判定'
+    }
     if ($SkipTopMostStage) {
         Write-ToolkitMessage -Kind Muted -Text '置顶阶段：已跳过（-SkipTopMost；置顶由后续工单实现）'
     } else {
@@ -1244,6 +1656,27 @@ function Show-AsDryRun {
             $label = if ($i -eq 0) { '启动前等待' } else { '等待' }
             Write-ToolkitMessage -Kind Info -Text "$prefix sleep $label $($item.Data.Ms) 毫秒"
             $readyCount++
+        } elseif ($item.Type -eq 'command') {
+            $group = if ($item.Data.ContainsKey('CommandGroup')) { $item.Data.CommandGroup } else { $null }
+            if ($group -and [object]::ReferenceEquals($group.Anchor, $item)) {
+                $groupIndexes = @($group.Items | ForEach-Object { $_.Index }) -join '、'
+                $groupLabel = if ($group.Kind -eq 'Default') {
+                    if ($TerminalInfo -and $TerminalInfo.SupportsTabs) { '标签组（默认，同一标签内顺序执行）' }
+                    else { '标签组（默认，同一窗口内顺序执行）' }
+                } elseif ($TerminalInfo -and $TerminalInfo.SupportsTabs) { '独占标签' }
+                else { '独占新窗口' }
+                $cwdText = if ($group.FirstCwd) { $group.FirstCwd } else { '未指定' }
+                $keepText = if ($group.KeepOpen) { '是' } else { '否' }
+                Write-ToolkitMessage -Kind Info -Text "$prefix command $groupLabel：启动项 [$groupIndexes]；工作目录：$cwdText；保留终端：$keepText；命令：$($item.Data.Command)"
+            } elseif ($group) {
+                $groupIndexes = @($group.Items | ForEach-Object { $_.Index }) -join '、'
+                $detail = Get-AsItemDetail -Item $item
+                Write-ToolkitMessage -Kind Info -Text "$prefix command 已并入标签组（启动项 [$groupIndexes]，首项 [$($group.Anchor.Index)]）：$detail"
+            } else {
+                $detail = Get-AsItemDetail -Item $item
+                Write-ToolkitMessage -Kind Info -Text "$prefix command $detail（未归入标签组）"
+            }
+            $readyCount++
         } else {
             $detail = Get-AsItemDetail -Item $item
             Write-ToolkitMessage -Kind Info -Text "$prefix $($item.Type) $detail（尚未实现）"
@@ -1258,7 +1691,7 @@ function Show-AsDryRun {
         }
     }
 
-    Write-ToolkitMessage -Kind Info -Text "DryRun 汇总：可执行 $readyCount 项（含已解析的 app 与 url），待后续工单实现 $pendingCount 项，校验失败 $failedCount 项"
+    Write-ToolkitMessage -Kind Info -Text "DryRun 汇总：可执行 $readyCount 项（含已解析的 app、url 与 command），待后续工单实现 $pendingCount 项（vscode），校验失败 $failedCount 项"
     Write-ToolkitMessage -Kind Muted -Text '未启动任何程序，未写日志。'
     return $failedCount
 }
@@ -1313,17 +1746,29 @@ $null = Initialize-AsAppTargets -Items $items
 # url 项在 DryRun 与执行前统一解析默认浏览器；解析失败只影响执行方式（退化）
 $null = Initialize-AsUrlTargets -Items $items
 
+# command 项在 DryRun 与执行前统一划分标签组；DryRun 与执行共用同一划分
+$null = Initialize-AsCommandGroups -Items $items
+
+# 默认终端只判定一次，DryRun 打印判定结果，执行阶段据此选择标签或新窗口
+$terminalInfo = Get-AsDefaultTerminalInfo
+
 if ($DryRun) {
-    $failedCount = Show-AsDryRun -Items $items -DefaultDelayMs $globalDelayMs -ConfigPath $configInfo.Path -SkipTopMostStage ([bool]$SkipTopMost)
+    $failedCount = Show-AsDryRun -Items $items -DefaultDelayMs $globalDelayMs -ConfigPath $configInfo.Path -SkipTopMostStage ([bool]$SkipTopMost) -TerminalInfo $terminalInfo
     if ($failedCount -gt 0) { exit 1 }
     exit 0
 }
 
 Write-ToolkitMessage -Kind Info -Text "启动配置：$($configInfo.Path)"
 Write-ToolkitMessage -Kind Info -Text "启动项：$($items.Count) 个；默认间隔：$globalDelayMs 毫秒"
+$terminalModeText = if ($terminalInfo.SupportsTabs) { 'Windows Terminal（支持标签）' } else { '无标签终端（不支持标签）' }
+Write-ToolkitMessage -Kind Muted -Text "默认终端：$terminalModeText"
 if ($SkipTopMost) {
     Write-ToolkitMessage -Kind Muted -Text '置顶阶段：本版本尚未实现，-SkipTopMost 无实际影响'
 }
+
+# command 组启动时读取脚本级缓存：默认终端判定结果与 pwsh 可执行文件路径
+$script:AsTerminalInfo = $terminalInfo
+$script:AsPwshExecutable = Get-AsPwshExecutable
 
 $successCount = 0
 $failureCount = 0
