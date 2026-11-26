@@ -70,7 +70,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.5.0
+    Version: 1.5.1
 #>
 
 param(
@@ -136,7 +136,7 @@ $helpSections = @(
         '名称启动扫描用户与机器开始菜单的 .lnk：快捷方式文件名精确匹配优先，否则子串匹配；'
         '无命中或多候选时该项失败，候选会写进失败原因。'
         '路径启动要求 .exe 或 .lnk 且路径存在；.lnk 同样解析目标以推导进程名。'
-        '路径会先展开 %VAR% 环境变量；相对路径相对启动配置所在目录（cli-tools）解析。'
+        '路径会先展开 %VAR% 环境变量；相对路径相对启动配置所在目录解析（默认与命名配置都在 cli-tools，因此通常即相对 cli-tools）。'
         'app 启动后轮询等待主窗口最多 10 秒再进入下一项，不抢焦点；超时记为成功并警告。'
     ) }
     @{ Title = '置顶'; Lines = @(
@@ -445,7 +445,7 @@ function Get-AsItemModel {
             } elseif ($Raw['path'] -isnot [string] -or [string]::IsNullOrWhiteSpace($Raw['path'])) {
                 $reasons += 'path 必须是非空字符串'
             } else {
-                # 相对路径以启动配置所在目录（cli-tools）为基准，避免登录时 cwd 为 System32
+                # 相对路径以启动配置所在目录为基准（配置通常位于 cli-tools），避免登录时 cwd 为 System32
                 $model.Data.Path = [string](Resolve-ToolkitPathValue -Path $Raw['path'].Trim() -Base $BaseDir)
             }
         }
