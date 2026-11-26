@@ -598,6 +598,9 @@ function Get-AsUwpStartApps {
         Get-StartApps 不可用或调用失败时只警告并返回空数组，不影响 .lnk 名称启动。
     .OUTPUTS
         PSCustomObject 数组：Name / AppId
+    .EXAMPLE
+        $apps = @(Get-AsUwpStartApps)
+        返回开始菜单中可通过 shell:AppsFolder 启动的商店应用
     .NOTES
         Author: SUNC
         Version: 1.0.0
@@ -715,6 +718,12 @@ function Find-AsNameCandidates {
         Get-AsUwpStartApps 返回的商店应用数组
     .OUTPUTS
         PSCustomObject：MatchType（Exact/Fuzzy/None）/ Candidates
+    .EXAMPLE
+        Find-AsNameCandidates -Name 'Claude' -Shortcuts $shortcuts -UwpApps $uwpApps
+        返回名称匹配的快捷方式与商店应用候选
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
     #>
     param(
         [string]$Name,
