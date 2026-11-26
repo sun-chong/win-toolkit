@@ -23,7 +23,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.3.0
+    Version: 1.3.1
     新窗口最大化依赖 VS Code 自身的 window.maximized 配置，脚本不再用 Win32 API 强制最大化。
 #>
 
@@ -54,77 +54,17 @@ if ($Help) {
 # 设置输出编码
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
-# 存储路径
-$storagePath = Join-Path $env:APPDATA 'Code\User\globalStorage\storage.json'
-
-# 检查 storage.json 是否存在
-if (-not (Test-Path $storagePath)) {
-    Write-Error "未找到 VS Code 存储文件: $storagePath"
-    exit 1
-}
-
-# 读取并解析 storage.json
+# 读取最近目录（公共库统一从 storage.json 提取并按小写路径去重）
 try {
-    $storageContent = Get-Content $storagePath -Raw -Encoding UTF8
-    $storageData = $storageContent | ConvertFrom-Json
+    $directories = @(Get-ToolkitVsCodeRecentFolder)
+}
+catch [System.IO.FileNotFoundException] {
+    Write-Error "未找到 VS Code 存储文件: $($_.Exception.FileName)"
+    exit 1
 }
 catch {
     Write-Error "读取 storage.json 失败: $_"
     exit 1
-}
-
-# 提取所有目录
-$directories = @()
-$seenPaths = @{}
-
-# 1. 从 windowsState.openedWindows 读取
-if ($storageData.windowsState -and $storageData.windowsState.openedWindows) {
-    foreach ($window in $storageData.windowsState.openedWindows) {
-        if ($window.folder) {
-            $path = [System.Uri]::UnescapeDataString($window.folder.Replace('file:///', ''))
-            if (-not $seenPaths.ContainsKey($path.ToLower())) {
-                $name = Split-Path $path -Leaf
-                $seenPaths[$path.ToLower()] = $true
-                $directories += [PSCustomObject]@{
-                    Name = $name
-                    Path = $path
-                }
-            }
-        }
-    }
-}
-
-# 2. 从 backupWorkspaces.folders 读取
-if ($storageData.backupWorkspaces -and $storageData.backupWorkspaces.folders) {
-    foreach ($folder in $storageData.backupWorkspaces.folders) {
-        if ($folder.folderUri) {
-            $path = [System.Uri]::UnescapeDataString($folder.folderUri.Replace('file:///', ''))
-            if (-not $seenPaths.ContainsKey($path.ToLower())) {
-                $name = Split-Path $path -Leaf
-                $seenPaths[$path.ToLower()] = $true
-                $directories += [PSCustomObject]@{
-                    Name = $name
-                    Path = $path
-                }
-            }
-        }
-    }
-}
-
-# 3. 从 profileAssociations.workspaces 读取
-if ($storageData.profileAssociations -and $storageData.profileAssociations.workspaces) {
-    $workspaces = $storageData.profileAssociations.workspaces | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name
-    foreach ($workspaceUri in $workspaces) {
-        $path = [System.Uri]::UnescapeDataString($workspaceUri.Replace('file:///', ''))
-        if (-not $seenPaths.ContainsKey($path.ToLower())) {
-            $name = Split-Path $path -Leaf
-            $seenPaths[$path.ToLower()] = $true
-            $directories += [PSCustomObject]@{
-                Name = $name
-                Path = $path
-            }
-        }
-    }
 }
 
 # 检查是否有目录
