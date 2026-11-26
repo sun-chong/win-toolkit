@@ -26,6 +26,12 @@
     keepOpen 默认 true，组内任一项为 true 即保留终端，全部为 false 才在命令结束后
     关闭。单个启动项失败不会中断清单，结束时给出成功/失败汇总并按结果设置退出码。
 
+    置顶（语义 B）：全部启动项执行完成后，未指定 -SkipTopMost 时，按配置顺序对标记
+    topMost 的 app 与 vscode 项各执行一次“切到前台”：app 按启动目标进程名找主窗口，
+    vscode 在 Code 进程窗口中找标题包含项目目录叶子名的窗口（多个匹配取启动时间最新
+    的）；多个置顶项依次激活，最后一个位于最上。只做一次性激活，不改变窗口的永久
+    层级。找不到窗口或激活失败时警告并写日志，不改变该项成功状态与退出码。
+
 .PARAMETER Config
     启动配置的短名或路径
     短参数：-c
@@ -36,10 +42,11 @@
 .PARAMETER DryRun
     只打印解析计划与每项间隔规则（app 显示命中的快捷方式与目标路径，
     url 显示默认浏览器可执行文件与网址清单，command 显示默认终端判定与
-    标签组划分，vscode 显示解析后的路径或匹配到的最近目录），不启动任何程序、不写日志
+    标签组划分，vscode 显示解析后的路径或匹配到的最近目录），末尾给出置顶计划摘要
+    （哪些序号会被激活与激活顺序），不启动任何程序、不激活任何窗口、不写日志
 
 .PARAMETER SkipTopMost
-    跳过置顶阶段；置顶由后续工单实现，本版本无实际效果
+    跳过置顶阶段：全部启动项执行完成后不再把标记 topMost 的 app/vscode 窗口切到前台
 
 .PARAMETER Help
     显示帮助信息
@@ -63,7 +70,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.4.0
+    Version: 1.5.0
 #>
 
 param(
@@ -95,7 +102,7 @@ $helpSections = @(
         'as -c as-shopee                 执行命名启动配置（短名/带 .config/完整文件名均可）'
         'as -c .\as-shopee.config.jsonc  按路径指定启动配置（相对路径相对 cli-tools 目录）'
         'as -DryRun                      只打印解析计划（含默认终端、标签组划分与 vscode 匹配），不启动程序、不写日志'
-        'as -SkipTopMost                 跳过置顶阶段（置顶由后续工单实现）'
+        'as -SkipTopMost                 跳过置顶阶段（全部启动项完成后不激活任何窗口）'
         'as -h                           显示帮助信息'
     ) }
     @{ Title = '启动配置'; Lines = @(
@@ -124,13 +131,20 @@ $helpSections = @(
         'vscode 的 path 用 code -n 打开新窗口；name 匹配 VS Code 最近打开目录（storage.json），'
         '目录名精确匹配优先，否则子串匹配；唯一命中才打开，无命中或多候选时该项失败，候选写进失败原因。'
         'code 命令不存在或启动异常时该项失败。'
-        '公共可选字段：delayMs（覆盖本项之后的间隔）、topMost（仅 app/vscode，置顶由后续工单实现）。'
+        '公共可选字段：delayMs（覆盖本项之后的间隔）、topMost（仅 app/vscode，执行完成后切到前台一次）。'
         '休眠项不接受 delayMs/topMost，出现时警告并忽略。'
         '名称启动扫描用户与机器开始菜单的 .lnk：快捷方式文件名精确匹配优先，否则子串匹配；'
         '无命中或多候选时该项失败，候选会写进失败原因。'
         '路径启动要求 .exe 或 .lnk 且路径存在；.lnk 同样解析目标以推导进程名。'
         '路径会先展开 %VAR% 环境变量；相对路径相对启动配置所在目录（cli-tools）解析。'
         'app 启动后轮询等待主窗口最多 10 秒再进入下一项，不抢焦点；超时记为成功并警告。'
+    ) }
+    @{ Title = '置顶'; Lines = @(
+        '全部启动项执行完成后，未指定 -SkipTopMost 时，按配置顺序把标记 topMost 的 app 与 vscode 项窗口切到前台一次。'
+        'app：按启动目标的进程名找到主窗口后激活；vscode：在 Code 进程窗口中找标题包含项目目录叶子名的窗口，多个匹配取启动时间最新的。'
+        '多个置顶项依次激活，最后一个位于最上；只做一次性激活，不改变窗口的永久层级，不做永久置顶。'
+        '找不到窗口或激活失败时警告并写日志，不改变该项成功状态、不影响退出码。'
+        'folder/url/command/sleep 配置 topMost 时警告并忽略，置顶阶段不尝试。'
     ) }
     @{ Title = '示例'; Lines = @(
         'as -DryRun                      预演默认配置，检查解析结果与间隔'
@@ -1597,6 +1611,273 @@ function Wait-AsAppMainWindow {
     }
 }
 
+# ============================================================
+# 置顶阶段（执行完成后一次性激活窗口）
+# ============================================================
+
+function Get-AsTopMostItems {
+    <#
+    .SYNOPSIS
+        取出需要置顶的启动项
+    .DESCRIPTION
+        只包含校验有效且标记 topMost 的 app 与 vscode 项，按配置顺序返回。
+        folder、url、command、sleep 配 topMost 时已在配置校验阶段警告并忽略，
+        这里不再尝试。
+    .PARAMETER Items
+        启动项模型数组
+    .OUTPUTS
+        启动项模型数组（可能为空）
+    #>
+    param([object[]]$Items)
+
+    return @(
+        $Items | Where-Object {
+            $_.Status -eq 'Valid' -and $_.TopMost -and $_.Type -in @('app', 'vscode')
+        }
+    )
+}
+
+function Resolve-AsTopMostTarget {
+    <#
+    .SYNOPSIS
+        解析置顶项的窗口识别条件
+    .DESCRIPTION
+        app 取启动目标的进程名；vscode 取项目路径的目录叶子名。
+        取不到时 Success 为 $false，Reason 给出中文原因，
+        供 DryRun 计划与执行阶段共用。
+    .PARAMETER Item
+        标记 topMost 的 app 或 vscode 启动项模型
+    .OUTPUTS
+        PSCustomObject：Success / Type / ProcessName / LeafName / Reason
+    #>
+    param([Parameter(Mandatory = $true)][object]$Item)
+
+    $result = [PSCustomObject]@{
+        Success     = $false
+        Type        = [string]$Item.Type
+        ProcessName = ''
+        LeafName    = ''
+        Reason      = ''
+    }
+
+    $launch = if ($Item.Data.ContainsKey('Launch')) { $Item.Data.Launch } else { $null }
+    if (-not $launch) {
+        $result.Reason = '未解析出启动目标'
+        return $result
+    }
+
+    if ($Item.Type -eq 'app') {
+        $processName = [string]$launch.ProcessName
+        if ([string]::IsNullOrWhiteSpace($processName)) {
+            $result.Reason = '未能从启动目标推导进程名'
+            return $result
+        }
+        $result.ProcessName = $processName
+        $result.Success = $true
+        return $result
+    }
+
+    $targetPath = [string]$launch.TargetPath
+    if ([string]::IsNullOrWhiteSpace($targetPath)) {
+        $result.Reason = '未能从启动目标取得项目路径'
+        return $result
+    }
+    $leafName = Split-Path -Leaf $targetPath
+    if ([string]::IsNullOrWhiteSpace($leafName)) {
+        $result.Reason = '未能从项目路径取得目录名'
+        return $result
+    }
+    $result.LeafName = $leafName
+    $result.Success = $true
+    return $result
+}
+
+function Get-AsTopMostItemDescription {
+    <#
+    .SYNOPSIS
+        生成置顶项的一句话说明
+    .DESCRIPTION
+        供 DryRun 计划与执行日志使用：app 显示目标进程名，
+        vscode 显示用于匹配窗口标题的项目目录叶子名；无法识别时说明原因。
+    .PARAMETER Item
+        标记 topMost 的 app 或 vscode 启动项模型
+    #>
+    param([Parameter(Mandatory = $true)][object]$Item)
+
+    $target = Resolve-AsTopMostTarget -Item $Item
+    if (-not $target.Success) {
+        return "$($Item.Type)（$($target.Reason)，执行时将跳过）"
+    }
+    if ($Item.Type -eq 'app') {
+        return "app（进程：$($target.ProcessName)）"
+    }
+    return "vscode（窗口标题包含：$($target.LeafName)）"
+}
+
+function Find-AsAppMainWindowHandle {
+    <#
+    .SYNOPSIS
+        轮询查找目标进程的主窗口句柄
+    .DESCRIPTION
+        按进程名查找全部实例：单实例应用会让新启动的进程立刻退出、由已有实例
+        展示窗口，因此不能只看 Start-Process 返回的进程。多个实例同时有主窗口时
+        取启动时间最新的一个。只读检测，不调用置前 API；超时返回零句柄。
+    .PARAMETER ProcessName
+        目标进程名（不含 .exe）
+    .PARAMETER TimeoutMs
+        最长等待毫秒数
+    .PARAMETER IntervalMs
+        轮询间隔毫秒数
+    .OUTPUTS
+        System.IntPtr；找不到时为零
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$ProcessName,
+        [int]$TimeoutMs = 10000,
+        [int]$IntervalMs = 100
+    )
+
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    while ($true) {
+        $candidate = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
+            Where-Object {
+                try { $_.Refresh(); $_.MainWindowHandle.ToInt64() -ne 0 } catch { $false }
+            } |
+            Sort-Object -Property { try { $_.StartTime } catch { [datetime]::MinValue } } -Descending |
+            Select-Object -First 1
+        if ($candidate) { return $candidate.MainWindowHandle }
+        if ((Get-Date) -ge $deadline) { return [IntPtr]::Zero }
+        Start-Sleep -Milliseconds $IntervalMs
+    }
+}
+
+function Find-AsVsCodeWindowHandle {
+    <#
+    .SYNOPSIS
+        轮询查找标题包含指定项目目录名的 VS Code 窗口句柄
+    .DESCRIPTION
+        在名称为 Code 且拥有主窗口的进程中，按主窗口标题大小写不敏感地匹配
+        项目目录叶子名；多个窗口匹配时取启动时间最新的一个。只读检测，
+        不调用置前 API；超时返回零句柄。
+    .PARAMETER LeafName
+        项目目录的叶子名，如 ProjectX
+    .PARAMETER TimeoutMs
+        最长等待毫秒数
+    .PARAMETER IntervalMs
+        轮询间隔毫秒数
+    .OUTPUTS
+        System.IntPtr；找不到时为零
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$LeafName,
+        [int]$TimeoutMs = 10000,
+        [int]$IntervalMs = 100
+    )
+
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    while ($true) {
+        $candidate = Get-Process -Name 'Code' -ErrorAction SilentlyContinue |
+            Where-Object {
+                try {
+                    $_.Refresh()
+                    $_.MainWindowHandle.ToInt64() -ne 0 -and
+                    -not [string]::IsNullOrWhiteSpace($_.MainWindowTitle) -and
+                    $_.MainWindowTitle.IndexOf($LeafName, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                } catch {
+                    $false
+                }
+            } |
+            Sort-Object -Property { try { $_.StartTime } catch { [datetime]::MinValue } } -Descending |
+            Select-Object -First 1
+        if ($candidate) { return $candidate.MainWindowHandle }
+        if ((Get-Date) -ge $deadline) { return [IntPtr]::Zero }
+        Start-Sleep -Milliseconds $IntervalMs
+    }
+}
+
+function Invoke-AsTopMostStage {
+    <#
+    .SYNOPSIS
+        按配置顺序把标记 topMost 的 app/vscode 窗口切到前台一次
+    .DESCRIPTION
+        在全部启动项执行完成后运行。app 按启动目标的进程名找主窗口，
+        vscode 在 Code 进程中找标题包含项目目录叶子名的窗口（多个匹配取启动
+        时间最新的）。每个窗口等待并激活一次，按配置顺序依次执行，最后一个位于
+        最上；只做一次性激活，不改变窗口的永久层级。
+        找不到窗口、无法识别窗口或激活失败时警告并写日志；未成功启动的项跳过。
+        本阶段不改变启动项成功状态，也不影响退出码。
+    .PARAMETER Items
+        启动项模型数组
+    .PARAMETER Results
+        执行结果哈希表，键为启动项序号；仅成功启动的项尝试置顶
+    #>
+    param(
+        [object[]]$Items,
+        [hashtable]$Results
+    )
+
+    $topMostItems = @(Get-AsTopMostItems -Items $Items)
+    if ($topMostItems.Count -eq 0) {
+        $line = '置顶阶段：没有标记 topMost 的有效 app/vscode 启动项'
+        Write-ToolkitMessage -Kind Muted -Text $line
+        Write-ToolkitLogLine -Tool 'as' -Text $line
+        return
+    }
+
+    $startLine = "置顶阶段：按配置顺序激活 $($topMostItems.Count) 个窗口"
+    Write-ToolkitMessage -Kind Info -Text $startLine
+    Write-ToolkitLogLine -Tool 'as' -Text $startLine
+
+    foreach ($item in $topMostItems) {
+        $prefix = "置顶 [启动项 $($item.Index)]"
+        $description = Get-AsTopMostItemDescription -Item $item
+
+        # 执行阶段未成功的项没有可激活的窗口；跳过且不改动其失败状态
+        $executionResult = if ($Results.ContainsKey($item.Index)) { $Results[$item.Index] } else { $null }
+        if (-not $executionResult -or -not $executionResult.Success) {
+            $line = "$prefix $description 跳过：该启动项未成功启动"
+            Write-ToolkitMessage -Kind Muted -Text $line
+            Write-ToolkitLogLine -Tool 'as' -Text $line
+            continue
+        }
+
+        $target = Resolve-AsTopMostTarget -Item $item
+        if (-not $target.Success) {
+            $line = "$prefix $description 警告：$($target.Reason)，跳过置顶"
+            Write-ToolkitMessage -Kind Warning -Text $line
+            Write-ToolkitLogLine -Tool 'as' -Text $line
+            continue
+        }
+
+        $handle = if ($item.Type -eq 'app') {
+            Find-AsAppMainWindowHandle -ProcessName $target.ProcessName `
+                -TimeoutMs $script:AsMainWindowTimeoutMs -IntervalMs $script:AsMainWindowPollMs
+        } else {
+            Find-AsVsCodeWindowHandle -LeafName $target.LeafName `
+                -TimeoutMs $script:AsMainWindowTimeoutMs -IntervalMs $script:AsMainWindowPollMs
+        }
+
+        if ($handle.ToInt64() -eq 0) {
+            $seconds = [int]($script:AsMainWindowTimeoutMs / 1000)
+            $windowText = if ($item.Type -eq 'app') { '主窗口' } else { '标题匹配的窗口' }
+            $line = "$prefix $description 警告：未在 $seconds 秒内找到$windowText，跳过置顶"
+            Write-ToolkitMessage -Kind Warning -Text $line
+            Write-ToolkitLogLine -Tool 'as' -Text $line
+            continue
+        }
+
+        $activated = [bool](Set-ToolkitForegroundWindow -Handle $handle)
+        if ($activated) {
+            $line = "$prefix $description：已切到前台"
+            Write-ToolkitMessage -Kind Success -Text $line
+        } else {
+            $line = "$prefix $description 警告：找到窗口但切到前台失败"
+            Write-ToolkitMessage -Kind Warning -Text $line
+        }
+        Write-ToolkitLogLine -Tool 'as' -Text $line
+    }
+}
+
 function Invoke-AsItem {
     <#
     .SYNOPSIS
@@ -1791,6 +2072,8 @@ function Show-AsDryRun {
         名称无命中或多候选时该项失败，候选目录随失败原因列出。
         command 显示默认终端判定，并按标签组打印成员序号、组工作目录与 keepOpen；
         默认组首项列出全部成员，其余成员标注“已并入标签组”，newTab 项标注独占标签/窗口。
+        计划末尾给出置顶计划摘要（哪些序号会被激活及顺序；-SkipTopMost 时说明跳过），
+        不激活任何窗口。
         返回校验失败（含 app 解析失败与目录不存在）的项数，供调用方决定退出码。
     .PARAMETER Items
         启动项模型数组
@@ -1825,12 +2108,6 @@ function Show-AsDryRun {
     } else {
         Write-ToolkitMessage -Kind Muted -Text '默认终端：未判定'
     }
-    if ($SkipTopMostStage) {
-        Write-ToolkitMessage -Kind Muted -Text '置顶阶段：已跳过（-SkipTopMost；置顶由后续工单实现）'
-    } else {
-        Write-ToolkitMessage -Kind Muted -Text '置顶阶段：由后续工单实现，本次预演不激活窗口'
-    }
-
     $readyCount = 0
     $failedCount = 0
 
@@ -1891,6 +2168,25 @@ function Show-AsDryRun {
             Write-ToolkitMessage -Kind Muted -Text "    后续间隔：$description"
         } else {
             Write-ToolkitMessage -Kind Muted -Text '    后续间隔：无（清单结束）'
+        }
+    }
+
+    # 置顶计划放在计划末尾：只列出将被激活的序号与顺序，不激活任何窗口
+    if ($SkipTopMostStage) {
+        Write-ToolkitMessage -Kind Muted -Text '置顶计划：已跳过（-SkipTopMost）'
+    } else {
+        $topMostItems = @(Get-AsTopMostItems -Items $Items)
+        if ($topMostItems.Count -eq 0) {
+            Write-ToolkitMessage -Kind Muted -Text '置顶计划：没有标记 topMost 的有效 app/vscode 启动项'
+        } else {
+            Write-ToolkitMessage -Kind Info -Text "置顶计划：按配置顺序激活 $($topMostItems.Count) 个窗口（最后一个位于最上；仅切到前台一次，不改变永久层级）"
+            $order = 1
+            foreach ($topMostItem in $topMostItems) {
+                $description = Get-AsTopMostItemDescription -Item $topMostItem
+                Write-ToolkitMessage -Kind Muted -Text "    $order. 启动项 [$($topMostItem.Index)] $description"
+                $order++
+            }
+            Write-ToolkitMessage -Kind Muted -Text '    DryRun 不激活任何窗口。'
         }
     }
 
@@ -1969,7 +2265,7 @@ Write-ToolkitMessage -Kind Info -Text "启动项：$($items.Count) 个；默认�
 $terminalModeText = if ($terminalInfo.SupportsTabs) { 'Windows Terminal（支持标签）' } else { '无标签终端（不支持标签）' }
 Write-ToolkitMessage -Kind Muted -Text "默认终端：$terminalModeText"
 if ($SkipTopMost) {
-    Write-ToolkitMessage -Kind Muted -Text '置顶阶段：本版本尚未实现，-SkipTopMost 无实际影响'
+    Write-ToolkitMessage -Kind Muted -Text '置顶阶段：已跳过（-SkipTopMost）'
 }
 
 # command 组启动时读取脚本级缓存：默认终端判定结果与 pwsh 可执行文件路径
@@ -1978,6 +2274,8 @@ $script:AsPwshExecutable = Get-AsPwshExecutable
 
 $successCount = 0
 $failureCount = 0
+# 置顶阶段只激活成功启动的项，按序号记录每项执行结果
+$itemResults = @{}
 
 for ($i = 0; $i -lt $items.Count; $i++) {
     $item = $items[$i]
@@ -1988,6 +2286,7 @@ for ($i = 0; $i -lt $items.Count; $i++) {
     } else {
         Invoke-AsItem -Item $item
     }
+    $itemResults[$item.Index] = $result
 
     $line = if ($result.Success) {
         "$prefix $($item.Type) 成功：$($result.Message)"
@@ -2018,6 +2317,11 @@ for ($i = 0; $i -lt $items.Count; $i++) {
             Start-Sleep -Milliseconds $intervalMs
         }
     }
+}
+
+# 全部启动项执行完后、汇总之前执行置顶阶段；失败只警告，不影响汇总与退出码
+if (-not $SkipTopMost) {
+    Invoke-AsTopMostStage -Items $items -Results $itemResults
 }
 
 $summary = "汇总：成功 $successCount，失败 $failureCount"
