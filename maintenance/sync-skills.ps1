@@ -47,7 +47,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.8.0
+    Version: 1.8.1
 #>
 
 param(
@@ -527,8 +527,8 @@ if ($tasks.Count -eq 0) {
 }
 
 # 日志写入公共库的共享按天文件 logs/<yyyyMMdd>.log：
-# BOM、并发追加与「只保留最近 10 份」均由 Write-ToolkitLogLine 统一处理
-$logFile = Join-Path (Join-Path $toolkitRoot "logs") ((Get-Date -Format "yyyyMMdd") + ".log")
+# 路径由 Get-ToolkitLogFilePath 统一计算，BOM、并发追加与保留策略由 Write-ToolkitLogLine 统一处理
+$logFile = Get-ToolkitLogFilePath
 
 Write-LogLine ""
 Write-LogLine "=== Skills 分发（Scope: $Scope）===" -Color Cyan

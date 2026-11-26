@@ -5,7 +5,8 @@
 .DESCRIPTION
     按一份有序启动清单依次执行启动项。默认读取 cli-tools\as.config.jsonc
     （兼容 .json），用 -c 可指定命名配置（如 as-shopee）或按路径指定配置，
-    一次运行只使用一份启动配置。
+    一次运行只使用一份启动配置；-c 的路径指向存在的 JSON/JSONC 文件时直接
+    使用该文件，不要求 .config 命名。
 
     本版本实现 app（名称启动/路径启动）、url（默认浏览器多标签）、folder（用资源
     管理器打开目录）、command（默认终端标签组执行）、vscode（VS Code 项目）与
@@ -35,9 +36,12 @@
 .PARAMETER Config
     启动配置的短名或路径
     短参数：-c
-    短名与相对路径都相对 cli-tools 目录解析；.config 与 .jsonc/.json 后缀可省略。
+    短名与相对路径都相对 cli-tools 目录解析；短名的 .config 与 .jsonc/.json 后缀可省略。
+    含分隔符或盘符的路径先展开环境变量并解析为绝对路径：该路径本身是存在的文件时
+    直接使用（不要求 .config 命名，支持 C:\cfg\foo.json 等任意 JSON/JSONC 文件）；
+    否则再按命名配置规则剥 .jsonc/.json 与 .config，补 .config 后探测扩展名。
     示例：-c as-shopee、-c as-shopee.config、-c as-shopee.config.jsonc、
-          -c .\as-shopee.config.jsonc、-c C:\configs\as-shopee.config.json
+          -c .\as-shopee.config.jsonc、-c C:\configs\foo.json
 
 .PARAMETER DryRun
     只打印解析计划与每项间隔规则（app 显示命中的快捷方式与目标路径，
@@ -70,7 +74,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.5.1
+    Version: 1.5.2
 #>
 
 param(
@@ -100,14 +104,16 @@ $helpSections = @(
     @{ Title = '使用方式'; Lines = @(
         'as                              执行默认启动配置 as.config'
         'as -c as-shopee                 执行命名启动配置（短名/带 .config/完整文件名均可）'
-        'as -c .\as-shopee.config.jsonc  按路径指定启动配置（相对路径相对 cli-tools 目录）'
+        'as -c .\as-shopee.config.jsonc  按路径指定启动配置（相对路径相对 cli-tools 目录；路径指向存在的 JSON/JSONC 文件时直接使用）'
         'as -DryRun                      只打印解析计划（含默认终端、标签组划分与 vscode 匹配），不启动程序、不写日志'
         'as -SkipTopMost                 跳过置顶阶段（全部启动项完成后不激活任何窗口）'
         'as -h                           显示帮助信息'
     ) }
     @{ Title = '启动配置'; Lines = @(
         '默认读取 cli-tools\as.config.jsonc（兼容 .json）；命名配置以 as- 开头。'
-        '-c 的短名与相对路径都在 cli-tools 目录下解析，.config 与 .jsonc/.json 后缀可省略。'
+        '-c 的短名与相对路径都在 cli-tools 目录下解析，短名的 .config 与 .jsonc/.json 后缀可省略。'
+        '含分隔符或盘符的路径先展开环境变量并解析为绝对路径：该路径本身是存在的文件时直接使用，'
+        '不要求 .config 命名（C:\cfg\foo.json 或任意 JSON/JSONC 文件均可）；否则再按命名规则补 .config 探测。'
         '顶层字段：delayMs（默认间隔，默认 1000 毫秒）、items（启动清单）。'
         '未知顶层字段只警告；配置缺失或 JSON/顶层结构错误时直接退出 1。'
     ) }
@@ -132,7 +138,8 @@ $helpSections = @(
         '目录名精确匹配优先，否则子串匹配；唯一命中才打开，无命中或多候选时该项失败，候选写进失败原因。'
         'code 命令不存在或启动异常时该项失败。'
         '公共可选字段：delayMs（覆盖本项之后的间隔）、topMost（仅 app/vscode，执行完成后切到前台一次）。'
-        '休眠项不接受 delayMs/topMost，出现时警告并忽略。'
+        '休眠项不接受 delayMs/topMost，出现时警告并忽略；休眠项校验失败（如 ms 非法）时该项跳过、'
+        '不执行等待，也不替代相邻间隔，按普通项规则使用默认间隔或前一项 delayMs。'
         '名称启动扫描用户与机器开始菜单的 .lnk：快捷方式文件名精确匹配优先，否则子串匹配；'
         '无命中或多候选时该项失败，候选会写进失败原因。'
         '路径启动要求 .exe 或 .lnk 且路径存在；.lnk 同样解析目标以推导进程名。'
@@ -177,41 +184,60 @@ function Resolve-AsConfigInfo {
     .SYNOPSIS
         解析 -c 指定的启动配置路径
     .DESCRIPTION
-        无 -c 时使用默认配置 as.config。先把 -c 的 .jsonc/.json 与 .config 后缀去掉，
-        统一补回 .config，再交给 Resolve-ToolkitConfigPath 探测扩展名（优先 .jsonc）。
-        含路径分隔符或以盘符开头时按路径处理，相对路径相对 cli-tools 目录解析；
-        其余短名也在 cli-tools 目录下解析。
+        无 -c 时使用默认配置 as.config。
+
+        含路径分隔符或以盘符开头的值按路径处理：先展开环境变量，相对路径相对
+        cli-tools 目录解析为绝对路径；该路径本身是存在的文件时直接使用，不要求
+        .config 命名（任意 JSON/JSONC 文件均可）。路径不存在为文件时，再按命名
+        配置规则剥掉 .jsonc/.json 与 .config 后缀，统一补回 .config，交由
+        Resolve-ToolkitConfigPath 探测扩展名（优先 .jsonc）。
+
+        不含分隔符与盘符的短名规则不变：同样剥后缀并补 .config，在 cli-tools
+        目录下解析并探测扩展名。
     .PARAMETER Name
         -c 的原始值；为空时使用默认配置
     .OUTPUTS
-        Resolve-ToolkitConfigPath 的返回值：Path / Exists / Extension
+        PSCustomObject：Path / Exists / Extension
     #>
     param([string]$Name)
 
     $value = if ([string]::IsNullOrWhiteSpace($Name)) { $script:DefaultConfigName } else { $Name.Trim() }
 
-    # 三种 -c 写法（as-shopee / as-shopee.config / as-shopee.config.jsonc）都归一到 as-shopee.config
-    $base = $value -replace '\.jsonc$', '' -replace '\.json$', ''
-    $base = $base -replace '\.config$', ''
-    if ([string]::IsNullOrWhiteSpace($base)) { $base = 'as' }
-
-    $isPath = $base -match '[\\/]' -or $base -match '^[A-Za-z]:'
+    $isPath = $value -match '[\\/]' -or $value -match '^[A-Za-z]:'
     if ($isPath) {
-        $expanded = Resolve-ToolkitPathValue -Path $base
-        $basePath = if ([System.IO.Path]::IsPathRooted($expanded)) {
+        $expanded = Resolve-ToolkitPathValue -Path $value
+        $pathValue = if ([System.IO.Path]::IsPathRooted($expanded)) {
             $expanded
         } else {
             Join-Path $script:ScriptDir $expanded
         }
-    } else {
-        $basePath = Join-Path $script:ScriptDir $base
+        try { $pathValue = [System.IO.Path]::GetFullPath($pathValue) } catch { $null = $_ }
+
+        # 路径本身指向存在的文件：直接使用，支持任意文件名与 JSON/JSONC 扩展名
+        if (Test-Path -LiteralPath $pathValue -PathType Leaf) {
+            return [PSCustomObject]@{
+                Path      = $pathValue
+                Exists    = $true
+                Extension = [System.IO.Path]::GetExtension($pathValue)
+            }
+        }
+
+        # 路径不存在为文件：按命名配置规则归一（剥 .jsonc/.json 与 .config 后补 .config）
+        $base = $pathValue -replace '\.jsonc$', '' -replace '\.json$', ''
+        $base = $base -replace '\.config$', ''
+    }
+    else {
+        # 三种短名写法（as-shopee / as-shopee.config / as-shopee.config.jsonc）都归一到 as-shopee.config
+        $base = $value -replace '\.jsonc$', '' -replace '\.json$', ''
+        $base = $base -replace '\.config$', ''
+        if ([string]::IsNullOrWhiteSpace($base)) { $base = 'as' }
+        $base = Join-Path $script:ScriptDir $base
+        try { $base = [System.IO.Path]::GetFullPath($base) } catch { $null = $_ }
     }
 
     # 归一化后拼接 .config，报错与列目录时都是干净路径
-    try { $basePath = [System.IO.Path]::GetFullPath($basePath) } catch { $null = $_ }
-    $basePath += '.config'
-
-    return (Resolve-ToolkitConfigPath -BasePath $basePath)
+    $base += '.config'
+    return (Resolve-ToolkitConfigPath -BasePath $base)
 }
 
 function Test-AsIntegerValue {
@@ -678,24 +704,26 @@ function Find-AsShortcutByName {
     }
 }
 
-function Get-AsShortcutCandidateText {
+function Get-AsCandidateText {
     <#
     .SYNOPSIS
-        把候选快捷方式格式化为失败原因中的一行文本
-    .PARAMETER Candidates
-        快捷方式 FileInfo 数组
+        把候选路径格式化为失败原因中的一行文本
+    .DESCRIPTION
+        快捷方式与 VS Code 最近目录两类失败原因共用：最多列出 Max 条路径，
+        其余以总数概括。
+    .PARAMETER Values
+        候选路径数组
     .PARAMETER Max
         最多列出的路径数，其余以数量概括
     #>
     param(
-        [object[]]$Candidates = @(),
+        [string[]]$Values = @(),
         [int]$Max = 6
     )
 
-    $paths = @($Candidates | ForEach-Object { $_.FullName })
-    if ($paths.Count -le $Max) { return ($paths -join '、') }
-    $head = ($paths | Select-Object -First $Max) -join '、'
-    return "$head 等 $($paths.Count) 个"
+    if ($Values.Count -le $Max) { return ($Values -join '、') }
+    $head = ($Values | Select-Object -First $Max) -join '、'
+    return "$head 等 $($Values.Count) 个"
 }
 
 function Resolve-AsAppTarget {
@@ -739,7 +767,7 @@ function Resolve-AsAppTarget {
         }
         if ($match.Candidates.Count -gt 1) {
             $label = if ($match.MatchType -eq 'Exact') { '精确' } else { '模糊' }
-            $candidateText = Get-AsShortcutCandidateText -Candidates $match.Candidates
+            $candidateText = Get-AsCandidateText -Values @($match.Candidates | ForEach-Object { $_.FullName })
             $result.Reason = "名称 '$name' $($label)匹配到多个开始菜单快捷方式：$candidateText"
             return $result
         }
@@ -820,26 +848,6 @@ function Initialize-AsAppTargets {
 # vscode 目标解析（路径与最近目录匹配）
 # ============================================================
 
-function Get-AsVsCodeCandidateText {
-    <#
-    .SYNOPSIS
-        把候选最近目录格式化为失败原因中的一行文本
-    .PARAMETER Candidates
-        最近目录对象数组（Name / Path）
-    .PARAMETER Max
-        最多列出的路径数，其余以数量概括
-    #>
-    param(
-        [object[]]$Candidates = @(),
-        [int]$Max = 6
-    )
-
-    $paths = @($Candidates | ForEach-Object { $_.Path })
-    if ($paths.Count -le $Max) { return ($paths -join '、') }
-    $head = ($paths | Select-Object -First $Max) -join '、'
-    return "$head 等 $($paths.Count) 个"
-}
-
 function Resolve-AsVsCodeTarget {
     <#
     .SYNOPSIS
@@ -897,7 +905,7 @@ function Resolve-AsVsCodeTarget {
         }
         if ($result.Candidates.Count -gt 1) {
             $label = if ($result.MatchType -eq 'Exact') { '精确' } else { '模糊' }
-            $candidateText = Get-AsVsCodeCandidateText -Candidates $result.Candidates
+            $candidateText = Get-AsCandidateText -Values @($result.Candidates | ForEach-Object { $_.Path })
             $result.Reason = "名称 '$name' $($label)匹配到多个 VS Code 最近打开目录：$candidateText"
             return $result
         }
@@ -1415,9 +1423,11 @@ function Invoke-AsCommandGroup {
                 throw '已判定支持标签，但未找到 wt.exe'
             }
             # wt 的参数含路径空格时必须自行加引号；-w 0 在已有窗口时加标签，否则新建窗口
+            # 工作目录先归一化为正斜杠再包裹引号：以 \ 结尾时反斜杠会转义收尾引号，wt 解析出错
             $wtArguments = '-w 0 new-tab'
             if ($Group.FirstCwd) {
-                $wtArguments += ' -d "' + $Group.FirstCwd.Replace('"', '""') + '"'
+                $wtDirectory = $Group.FirstCwd.Replace('\', '/').Replace('"', '""')
+                $wtArguments += ' -d "' + $wtDirectory + '"'
             }
             $wtArguments += ' -- "' + $pwshPath.Replace('"', '""') + '" -NoProfile'
             if ($keepOpen) { $wtArguments += ' -NoExit' }
@@ -1527,8 +1537,9 @@ function Get-AsIntervalMs {
     .SYNOPSIS
         计算相邻启动项之间的等待毫秒数
     .DESCRIPTION
-        任一端为休眠项时为 0（休眠项替代默认间隔，不叠加）；
-        否则取前一项的 delayMs（若有），再退回全局默认间隔。
+        任一端是校验有效的休眠项时为 0（休眠项替代默认间隔，不叠加）；
+        校验失败的休眠项不执行等待，也不替代间隔，按普通项规则处理：
+        取前一项的 delayMs（若有），再退回全局默认间隔。
     .PARAMETER Previous
         前一个启动项模型
     .PARAMETER Next
@@ -1542,7 +1553,9 @@ function Get-AsIntervalMs {
         [int]$DefaultDelayMs
     )
 
-    if ($Previous.Type -eq 'sleep' -or $Next.Type -eq 'sleep') { return 0 }
+    $previousSleep = $Previous.Type -eq 'sleep' -and $Previous.Status -eq 'Valid'
+    $nextSleep = $Next.Type -eq 'sleep' -and $Next.Status -eq 'Valid'
+    if ($previousSleep -or $nextSleep) { return 0 }
     if ($null -ne $Previous.DelayMs) { return [int]$Previous.DelayMs }
     return $DefaultDelayMs
 }
@@ -1551,6 +1564,9 @@ function Get-AsIntervalDescription {
     <#
     .SYNOPSIS
         生成 DryRun 用的间隔规则说明
+    .DESCRIPTION
+        与 Get-AsIntervalMs 使用同一判定：只有校验有效的休眠项才替代间隔；
+        校验失败的休眠项按普通项规则展示默认间隔或前一项 delayMs。
     #>
     param(
         [object]$Previous,
@@ -1558,57 +1574,21 @@ function Get-AsIntervalDescription {
         [int]$DefaultDelayMs
     )
 
-    if ($Previous.Type -eq 'sleep' -and $Next.Type -eq 'sleep') {
+    $previousSleep = $Previous.Type -eq 'sleep' -and $Previous.Status -eq 'Valid'
+    $nextSleep = $Next.Type -eq 'sleep' -and $Next.Status -eq 'Valid'
+    if ($previousSleep -and $nextSleep) {
         return '0 毫秒（两个休眠项相邻，无额外间隔）'
     }
-    if ($Previous.Type -eq 'sleep') {
+    if ($previousSleep) {
         return '0 毫秒（休眠项替代相邻默认间隔）'
     }
-    if ($Next.Type -eq 'sleep') {
+    if ($nextSleep) {
         return '0 毫秒（下一项为休眠项，替代默认间隔）'
     }
     if ($null -ne $Previous.DelayMs) {
         return "$($Previous.DelayMs) 毫秒（本项 delayMs 覆盖默认间隔）"
     }
     return "$DefaultDelayMs 毫秒（默认间隔）"
-}
-
-# ============================================================
-# 执行与预演
-# ============================================================
-
-function Wait-AsAppMainWindow {
-    <#
-    .SYNOPSIS
-        轮询目标进程是否出现主窗口
-    .DESCRIPTION
-        按进程名查找任意实例的主窗口（单实例应用会让新启动的进程立刻退出，
-        窗口由已有实例展示，因此不能只看 Start-Process 返回的进程）。
-        只读检测，不调用任何置前/抢焦点 API；超时返回 $false。
-    .PARAMETER ProcessName
-        目标进程名（不含 .exe）
-    .PARAMETER TimeoutMs
-        最长等待毫秒数
-    .PARAMETER IntervalMs
-        轮询间隔毫秒数
-    #>
-    param(
-        [Parameter(Mandatory = $true)][string]$ProcessName,
-        [int]$TimeoutMs = 10000,
-        [int]$IntervalMs = 100
-    )
-
-    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
-    while ($true) {
-        $candidate = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
-            Where-Object {
-                try { $_.Refresh(); $_.MainWindowHandle.ToInt64() -ne 0 } catch { $false }
-            } |
-            Select-Object -First 1
-        if ($candidate) { return $true }
-        if ((Get-Date) -ge $deadline) { return $false }
-        Start-Sleep -Milliseconds $IntervalMs
-    }
 }
 
 # ============================================================
@@ -1714,87 +1694,6 @@ function Get-AsTopMostItemDescription {
     return "vscode（窗口标题包含：$($target.LeafName)）"
 }
 
-function Find-AsAppMainWindowHandle {
-    <#
-    .SYNOPSIS
-        轮询查找目标进程的主窗口句柄
-    .DESCRIPTION
-        按进程名查找全部实例：单实例应用会让新启动的进程立刻退出、由已有实例
-        展示窗口，因此不能只看 Start-Process 返回的进程。多个实例同时有主窗口时
-        取启动时间最新的一个。只读检测，不调用置前 API；超时返回零句柄。
-    .PARAMETER ProcessName
-        目标进程名（不含 .exe）
-    .PARAMETER TimeoutMs
-        最长等待毫秒数
-    .PARAMETER IntervalMs
-        轮询间隔毫秒数
-    .OUTPUTS
-        System.IntPtr；找不到时为零
-    #>
-    param(
-        [Parameter(Mandatory = $true)][string]$ProcessName,
-        [int]$TimeoutMs = 10000,
-        [int]$IntervalMs = 100
-    )
-
-    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
-    while ($true) {
-        $candidate = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
-            Where-Object {
-                try { $_.Refresh(); $_.MainWindowHandle.ToInt64() -ne 0 } catch { $false }
-            } |
-            Sort-Object -Property { try { $_.StartTime } catch { [datetime]::MinValue } } -Descending |
-            Select-Object -First 1
-        if ($candidate) { return $candidate.MainWindowHandle }
-        if ((Get-Date) -ge $deadline) { return [IntPtr]::Zero }
-        Start-Sleep -Milliseconds $IntervalMs
-    }
-}
-
-function Find-AsVsCodeWindowHandle {
-    <#
-    .SYNOPSIS
-        轮询查找标题包含指定项目目录名的 VS Code 窗口句柄
-    .DESCRIPTION
-        在名称为 Code 且拥有主窗口的进程中，按主窗口标题大小写不敏感地匹配
-        项目目录叶子名；多个窗口匹配时取启动时间最新的一个。只读检测，
-        不调用置前 API；超时返回零句柄。
-    .PARAMETER LeafName
-        项目目录的叶子名，如 ProjectX
-    .PARAMETER TimeoutMs
-        最长等待毫秒数
-    .PARAMETER IntervalMs
-        轮询间隔毫秒数
-    .OUTPUTS
-        System.IntPtr；找不到时为零
-    #>
-    param(
-        [Parameter(Mandatory = $true)][string]$LeafName,
-        [int]$TimeoutMs = 10000,
-        [int]$IntervalMs = 100
-    )
-
-    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
-    while ($true) {
-        $candidate = Get-Process -Name 'Code' -ErrorAction SilentlyContinue |
-            Where-Object {
-                try {
-                    $_.Refresh()
-                    $_.MainWindowHandle.ToInt64() -ne 0 -and
-                    -not [string]::IsNullOrWhiteSpace($_.MainWindowTitle) -and
-                    $_.MainWindowTitle.IndexOf($LeafName, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
-                } catch {
-                    $false
-                }
-            } |
-            Sort-Object -Property { try { $_.StartTime } catch { [datetime]::MinValue } } -Descending |
-            Select-Object -First 1
-        if ($candidate) { return $candidate.MainWindowHandle }
-        if ((Get-Date) -ge $deadline) { return [IntPtr]::Zero }
-        Start-Sleep -Milliseconds $IntervalMs
-    }
-}
-
 function Invoke-AsTopMostStage {
     <#
     .SYNOPSIS
@@ -1850,10 +1749,10 @@ function Invoke-AsTopMostStage {
         }
 
         $handle = if ($item.Type -eq 'app') {
-            Find-AsAppMainWindowHandle -ProcessName $target.ProcessName `
+            Wait-ToolkitWindowHandle -ProcessName $target.ProcessName `
                 -TimeoutMs $script:AsMainWindowTimeoutMs -IntervalMs $script:AsMainWindowPollMs
         } else {
-            Find-AsVsCodeWindowHandle -LeafName $target.LeafName `
+            Wait-ToolkitWindowHandle -ProcessName 'Code' -TitleContains $target.LeafName `
                 -TimeoutMs $script:AsMainWindowTimeoutMs -IntervalMs $script:AsMainWindowPollMs
         }
 
@@ -1989,9 +1888,9 @@ function Invoke-AsItem {
 
             $warning = ''
             if ($launch.ProcessName) {
-                $detected = Wait-AsAppMainWindow -ProcessName $launch.ProcessName `
+                $handle = Wait-ToolkitWindowHandle -ProcessName $launch.ProcessName `
                     -TimeoutMs $script:AsMainWindowTimeoutMs -IntervalMs $script:AsMainWindowPollMs
-                if (-not $detected) {
+                if ($handle.ToInt64() -eq 0) {
                     $seconds = [int]($script:AsMainWindowTimeoutMs / 1000)
                     $warning = "未在 $seconds 秒内检测到主窗口（进程 $($launch.ProcessName)）"
                 }

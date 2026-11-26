@@ -1,16 +1,52 @@
+function Get-ToolkitLogFilePath {
+    <#
+    .SYNOPSIS
+        返回共享按天日志文件的路径
+    .DESCRIPTION
+        返回 <Directory>\<yyyyMMdd>.log。Directory 省略时使用仓库根目录下的 logs。
+        只计算路径，不创建目录、不写文件；Write-ToolkitLogLine 与需要展示日志路径的
+        调用方共用本函数，保证展示路径与实际写入路径一致。
+    .PARAMETER Directory
+        日志目录；省略时使用仓库根目录下的 logs
+    .EXAMPLE
+        Get-ToolkitLogFilePath
+        返回仓库根 logs\<今天>.log 的完整路径
+    .EXAMPLE
+        Get-ToolkitLogFilePath -Directory 'C:\Temp\logs'
+        返回 C:\Temp\logs\<今天>.log，不创建该目录
+    .OUTPUTS
+        System.String：日志文件完整路径
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Directory
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Directory)) {
+        $Directory = Join-Path $script:ToolkitRoot 'logs'
+    }
+    return (Join-Path $Directory ((Get-Date).ToString('yyyyMMdd') + '.log'))
+}
+
 function Write-ToolkitLogLine {
     <#
     .SYNOPSIS
         向共享按天日志文件追加一行
     .DESCRIPTION
-        把一行内容追加到 <Directory>\<yyyyMMdd>.log，供仓库内所有工具共用同一份按天日志。
+        把一行内容追加到 Get-ToolkitLogFilePath 返回的 <Directory>\<yyyyMMdd>.log，
+        供仓库内所有工具共用同一份按天日志。
         行格式为 [HH:mm:ss] [工具名] 内容；-Text 为空字符串时写入空行。
 
         新建日志文件时写入 UTF-8 BOM，否则记事本与 type 会按 ANSI 解析而显示乱码。
         通过命名 Mutex（Local\ToolkitLog-<yyyyMMdd>）串行化同一天的并发追加，
         每次打开文件后定位到当前末尾再写入，多个进程写同一文件也不会互相覆盖或穿插。
 
-        每次成功写入后只保留最近 10 份匹配 <yyyyMMdd>.log 的日志，按文件名删除更早的。
+        只保留最近 10 份匹配 <yyyyMMdd>.log 的日志，按文件名删除更早的。
+        清理按进程每天只执行一次（当天首次成功写入时），避免每写一行都枚举目录；
+        清理失败用 Write-Warning 提示，不影响本次写入。
         函数不向控制台输出成功信息；写入失败时用 Write-Warning 提示，不抛异常。
     .PARAMETER Text
         行内容；传空字符串写入空行
@@ -37,10 +73,9 @@ function Write-ToolkitLogLine {
     $day = $now.ToString('yyyyMMdd')
     $stamp = $now.ToString('HH:mm:ss')
 
-    if ([string]::IsNullOrWhiteSpace($Directory)) {
-        $Directory = Join-Path $script:ToolkitRoot 'logs'
-    }
-    $path = Join-Path $Directory "$day.log"
+    # 与展示日志路径的调用方共用同一计算规则，避免两处拼接结果不一致
+    $path = Get-ToolkitLogFilePath -Directory $Directory
+    $Directory = Split-Path -Parent $path
 
     $line = if ([string]::IsNullOrEmpty($Text)) {
         ''
@@ -82,20 +117,24 @@ function Write-ToolkitLogLine {
         $stream.Write($payload, 0, $payload.Length)
         $stream.Flush()
 
-        # 只保留最近 10 份按天日志；清理失败不影响本次写入
-        try {
-            $files = @(
-                Get-ChildItem -LiteralPath $Directory -File |
-                    Where-Object { $_.Name -match '^\d{8}\.log$' } |
-                    Sort-Object Name
-            )
-            if ($files.Count -gt 10) {
-                $files | Select-Object -First ($files.Count - 10) | ForEach-Object {
-                    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+        # 只保留最近 10 份按天日志：每个进程每天只在首次成功写入时清理一次，
+        # 避免每写一行都枚举目录；清理失败不影响本次写入
+        if ($script:ToolkitLogCleanupDay -ne $day) {
+            $script:ToolkitLogCleanupDay = $day
+            try {
+                $files = @(
+                    Get-ChildItem -LiteralPath $Directory -File |
+                        Where-Object { $_.Name -match '^\d{8}\.log$' } |
+                        Sort-Object Name
+                )
+                if ($files.Count -gt 10) {
+                    $files | Select-Object -First ($files.Count - 10) | ForEach-Object {
+                        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                    }
                 }
+            } catch {
+                Write-Warning "清理旧日志失败：$($_.Exception.Message)"
             }
-        } catch {
-            Write-Warning "清理旧日志失败：$($_.Exception.Message)"
         }
     } catch {
         Write-Warning "写入日志失败：$path — $($_.Exception.Message)"
