@@ -8,11 +8,15 @@
     一次运行只使用一份启动配置。
 
     本版本实现 app（名称启动/路径启动）、url（默认浏览器多标签）、folder（用资源
-    管理器打开目录）、command（默认终端标签组执行）与 sleep（显式等待）五类启动项；
-    vscode 完成解析与校验后标记为失败，并提示该类型将在后续工单实现。url 读取系统
-    默认浏览器可执行文件，把该项全部网址一次性作为参数交给浏览器，使多个网址在同一
-    窗口以多标签打开；解析不到默认浏览器时退化为逐个打开网址，不算失败。名称启动先按
-    快捷方式文件名精确匹配，无精确命中时改用子串匹配；无命中或多候选时该项失败。
+    管理器打开目录）、command（默认终端标签组执行）、vscode（VS Code 项目）与
+    sleep（显式等待）六类启动项。url 读取系统默认浏览器可执行文件，把该项全部网址
+    一次性作为参数交给浏览器，使多个网址在同一窗口以多标签打开；解析不到默认浏览器
+    时退化为逐个打开网址，不算失败。名称启动先按快捷方式文件名精确匹配，无精确命中
+    时改用子串匹配；无命中或多候选时该项失败。
+
+    vscode 的 path 直接以 code -n 打开新窗口；name 匹配 VS Code 最近打开目录，目录名
+    精确匹配优先，无精确命中时改用子串匹配，唯一命中才打开；无命中或多候选时该项失败，
+    候选目录写入失败原因。code 命令不存在或启动异常时该项失败。
 
     command 先读 HKCU:\Console\%%Startup 判定系统默认终端：登记为 Windows Terminal
     且 wt.exe 可用时支持标签，所有未标记 newTab 的命令按配置顺序并入同一标签组，在
@@ -32,7 +36,7 @@
 .PARAMETER DryRun
     只打印解析计划与每项间隔规则（app 显示命中的快捷方式与目标路径，
     url 显示默认浏览器可执行文件与网址清单，command 显示默认终端判定与
-    标签组划分），不启动任何程序、不写日志
+    标签组划分，vscode 显示解析后的路径或匹配到的最近目录），不启动任何程序、不写日志
 
 .PARAMETER SkipTopMost
     跳过置顶阶段；置顶由后续工单实现，本版本无实际效果
@@ -59,7 +63,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.3.0
+    Version: 1.4.0
 #>
 
 param(
@@ -90,7 +94,7 @@ $helpSections = @(
         'as                              执行默认启动配置 as.config'
         'as -c as-shopee                 执行命名启动配置（短名/带 .config/完整文件名均可）'
         'as -c .\as-shopee.config.jsonc  按路径指定启动配置（相对路径相对 cli-tools 目录）'
-        'as -DryRun                      只打印解析计划（含默认终端与标签组划分），不启动程序、不写日志'
+        'as -DryRun                      只打印解析计划（含默认终端、标签组划分与 vscode 匹配），不启动程序、不写日志'
         'as -SkipTopMost                 跳过置顶阶段（置顶由后续工单实现）'
         'as -h                           显示帮助信息'
     ) }
@@ -105,7 +109,7 @@ $helpSections = @(
         'url      urls（字符串或字符串数组）            默认浏览器多标签（本版本已实现）'
         'folder   path                                  资源管理器打开目录（本版本已实现）'
         'command  command，可选 cwd/newTab/keepOpen     默认终端标签组执行（本版本已实现）'
-        'vscode   path 或 name（二者互斥）              VS Code 打开项目（后续工单实现）'
+        'vscode   path 或 name（二者互斥）              VS Code 打开项目（本版本已实现）'
         'sleep    ms（正整数）                          显式等待（本版本已实现）'
         'url 读取 HKCU 的 http UserChoice ProgId 与对应 shell\open\command，解析系统默认浏览器；'
         '解析成功时把该项全部网址一次性交给浏览器，多个网址在同一窗口以多标签打开；'
@@ -117,6 +121,9 @@ $helpSections = @(
         '后续非 newTab 命令项到位置时只记录“已并入标签组”，不再启动新终端；组内命令连续执行，不受 delayMs 影响，'
         '但每个 command 项仍按清单位置参与相邻间隔。'
         'keepOpen 默认 true（保留终端），组内任一项为 true 即保留，全部为 false 才在命令结束后关闭。'
+        'vscode 的 path 用 code -n 打开新窗口；name 匹配 VS Code 最近打开目录（storage.json），'
+        '目录名精确匹配优先，否则子串匹配；唯一命中才打开，无命中或多候选时该项失败，候选写进失败原因。'
+        'code 命令不存在或启动异常时该项失败。'
         '公共可选字段：delayMs（覆盖本项之后的间隔）、topMost（仅 app/vscode，置顶由后续工单实现）。'
         '休眠项不接受 delayMs/topMost，出现时警告并忽略。'
         '名称启动扫描用户与机器开始菜单的 .lnk：快捷方式文件名精确匹配优先，否则子串匹配；'
@@ -796,6 +803,153 @@ function Initialize-AsAppTargets {
 }
 
 # ============================================================
+# vscode 目标解析（路径与最近目录匹配）
+# ============================================================
+
+function Get-AsVsCodeCandidateText {
+    <#
+    .SYNOPSIS
+        把候选最近目录格式化为失败原因中的一行文本
+    .PARAMETER Candidates
+        最近目录对象数组（Name / Path）
+    .PARAMETER Max
+        最多列出的路径数，其余以数量概括
+    #>
+    param(
+        [object[]]$Candidates = @(),
+        [int]$Max = 6
+    )
+
+    $paths = @($Candidates | ForEach-Object { $_.Path })
+    if ($paths.Count -le $Max) { return ($paths -join '、') }
+    $head = ($paths | Select-Object -First $Max) -join '、'
+    return "$head 等 $($paths.Count) 个"
+}
+
+function Resolve-AsVsCodeTarget {
+    <#
+    .SYNOPSIS
+        把一个有效 vscode 启动项解析为 VS Code 打开目标
+    .DESCRIPTION
+        路径写法校验路径存在（目录或文件均可）；名称写法在 VS Code 最近打开目录中
+        先按目录名精确匹配，无精确命中时改用子串匹配。唯一命中才成功；
+        无命中或多候选时失败，候选目录写入失败原因。
+    .PARAMETER Item
+        已通过字段校验的 vscode 启动项模型
+    .PARAMETER RecentFolders
+        Get-ToolkitVsCodeRecentFolder 返回的最近目录数组，由调用方读取一次后复用
+    .OUTPUTS
+        PSCustomObject：Success / Reason / Mode / TargetPath / Candidates / MatchType
+    #>
+    param(
+        [Parameter(Mandatory = $true)][object]$Item,
+        [object[]]$RecentFolders = @()
+    )
+
+    $result = [PSCustomObject]@{
+        Success    = $false
+        Reason     = ''
+        Mode       = ''
+        TargetPath = ''
+        Candidates = @()
+        MatchType  = ''
+    }
+
+    if ($Item.Data.ContainsKey('Name')) {
+        $result.Mode = 'Name'
+        $name = [string]$Item.Data.Name
+
+        $exact = @(
+            $RecentFolders | Where-Object {
+                [string]::Equals($_.Name, $name, [System.StringComparison]::OrdinalIgnoreCase)
+            } | Sort-Object Path
+        )
+        if ($exact.Count -gt 0) {
+            $result.MatchType = 'Exact'
+            $result.Candidates = @($exact)
+        } else {
+            $fuzzy = @(
+                $RecentFolders | Where-Object {
+                    $_.Name.IndexOf($name, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                } | Sort-Object Path
+            )
+            $result.MatchType = if ($fuzzy.Count -gt 0) { 'Fuzzy' } else { 'None' }
+            $result.Candidates = @($fuzzy)
+        }
+
+        if ($result.Candidates.Count -eq 0) {
+            $result.Reason = "未在 VS Code 最近打开目录中找到名称包含 '$name' 的目录"
+            return $result
+        }
+        if ($result.Candidates.Count -gt 1) {
+            $label = if ($result.MatchType -eq 'Exact') { '精确' } else { '模糊' }
+            $candidateText = Get-AsVsCodeCandidateText -Candidates $result.Candidates
+            $result.Reason = "名称 '$name' $($label)匹配到多个 VS Code 最近打开目录：$candidateText"
+            return $result
+        }
+
+        $result.TargetPath = [string]$result.Candidates[0].Path
+        $result.Success = $true
+        return $result
+    }
+
+    $result.Mode = 'Path'
+    $path = [string]$Item.Data.Path
+    if (-not (Test-Path -LiteralPath $path)) {
+        $result.Reason = "路径不存在：$path"
+        return $result
+    }
+    $result.TargetPath = $path
+    $result.Success = $true
+    return $result
+}
+
+function Initialize-AsVsCodeTargets {
+    <#
+    .SYNOPSIS
+        在 DryRun 与执行之前统一解析所有有效 vscode 启动项
+    .DESCRIPTION
+        只有存在名称匹配项时才读取一次 VS Code 最近目录，所有名称项共用该结果；
+        读取失败时把所有名称项标记为 Failed（路径项不受影响）。
+        解析成功把结果写入 Data.Launch；失败同样标记 Failed 并给出原因。
+    .PARAMETER Items
+        启动项模型数组（就地修改）
+    #>
+    param([object[]]$Items)
+
+    $nameItems = @(
+        $Items | Where-Object {
+            $_.Type -eq 'vscode' -and $_.Status -eq 'Valid' -and $_.Data.ContainsKey('Name')
+        }
+    )
+    $recentFolders = @()
+    $recentError = ''
+    if ($nameItems.Count -gt 0) {
+        try {
+            $recentFolders = @(Get-ToolkitVsCodeRecentFolder)
+        } catch {
+            $recentError = $_.Exception.Message
+        }
+    }
+
+    foreach ($item in $Items) {
+        if ($item.Type -ne 'vscode' -or $item.Status -ne 'Valid') { continue }
+        if ($item.Data.ContainsKey('Name') -and $recentError) {
+            $item.Status = 'Failed'
+            $item.Reason = "读取 VS Code 最近打开目录失败：$recentError"
+            continue
+        }
+        $resolution = Resolve-AsVsCodeTarget -Item $item -RecentFolders $recentFolders
+        if ($resolution.Success) {
+            $item.Data.Launch = $resolution
+        } else {
+            $item.Status = 'Failed'
+            $item.Reason = $resolution.Reason
+        }
+    }
+}
+
+# ============================================================
 # url 目标解析（默认浏览器）
 # ============================================================
 
@@ -1333,7 +1487,16 @@ function Get-AsItemDetail {
             return $text
         }
         'vscode' {
-            $text = if ($Item.Data.ContainsKey('Name')) { "名称：$($Item.Data.Name)" } else { "路径：$($Item.Data.Path)" }
+            if ($Item.Data.ContainsKey('Launch')) {
+                $launch = $Item.Data.Launch
+                $text = if ($launch.Mode -eq 'Name') {
+                    "名称：$($Item.Data.Name) → $($launch.TargetPath)"
+                } else {
+                    "路径：$($launch.TargetPath)"
+                }
+            } else {
+                $text = if ($Item.Data.ContainsKey('Name')) { "名称：$($Item.Data.Name)" } else { "路径：$($Item.Data.Path)" }
+            }
             if ($Item.TopMost) { $text += '；置顶：是' }
             return $text
         }
@@ -1439,7 +1602,8 @@ function Invoke-AsItem {
     .SYNOPSIS
         执行单个启动项
     .DESCRIPTION
-        本版本执行 app、url、folder、command 与 sleep；vscode 返回失败并提示后续工单实现。
+        本版本执行 app、url、folder、command、vscode 与 sleep 六类启动项。
+        vscode 用 code -n 打开解析后的路径（新窗口）；code 命令不存在或启动异常时该项失败。
         url 解析到默认浏览器时把全部网址一次性交给浏览器（同一窗口多标签）；
         解析不到时退化为逐个 Start-Process（与 op 一致），结果 Message 标注退化。
         command 只在其标签组首项位置启动整组；同组后续项到位置时读取组结果：
@@ -1569,8 +1733,48 @@ function Invoke-AsItem {
             }
             return [PSCustomObject]@{ Success = $false; Message = $reason; Warning = '' }
         }
+        'vscode' {
+            if (-not $Item.Data.ContainsKey('Launch')) {
+                return [PSCustomObject]@{ Success = $false; Message = '未解析出 VS Code 打开目标'; Warning = '' }
+            }
+
+            $launch = $Item.Data.Launch
+            $target = [string]$launch.TargetPath
+            if (-not (Test-ExternalCommand -Name 'code')) {
+                return [PSCustomObject]@{
+                    Success = $false
+                    Message = "未找到 code 命令（VS Code CLI），无法打开：$target"
+                    Warning = ''
+                }
+            }
+
+            try {
+                # 与 vsc 相同：在当前控制台调用 code -n，由 VS Code 打开新窗口
+                $null = & code -n $target
+                if ($LASTEXITCODE -ne 0) {
+                    return [PSCustomObject]@{
+                        Success = $false
+                        Message = "code 命令退出码 $($LASTEXITCODE)，未能打开：$target"
+                        Warning = ''
+                    }
+                }
+            } catch {
+                return [PSCustomObject]@{
+                    Success = $false
+                    Message = "启动 VS Code 失败：$($_.Exception.Message)"
+                    Warning = ''
+                }
+            }
+
+            $message = if ($launch.Mode -eq 'Name') {
+                "已用 VS Code 打开（名称：$($Item.Data.Name)）：$target"
+            } else {
+                "已用 VS Code 打开：$target"
+            }
+            return [PSCustomObject]@{ Success = $true; Message = $message; Warning = '' }
+        }
         default {
-            return [PSCustomObject]@{ Success = $false; Message = '该类型将在后续工单实现'; Warning = '' }
+            return [PSCustomObject]@{ Success = $false; Message = '不支持的启动项类型'; Warning = '' }
         }
     }
 }
@@ -1583,7 +1787,8 @@ function Show-AsDryRun {
         逐项打印序号、类型与解析结果；app 显示命中的快捷方式与目标路径
         （或路径启动解析后的路径），url 显示默认浏览器与网址清单（解析失败时
         提示将退化为逐个打开，不算失败），folder 显示展开后的路径，
-        sleep 显示毫秒数，vscode 显示配置摘要并标注尚未实现。
+        sleep 显示毫秒数，vscode 显示解析后的路径或匹配到的最近目录；
+        名称无命中或多候选时该项失败，候选目录随失败原因列出。
         command 显示默认终端判定，并按标签组打印成员序号、组工作目录与 keepOpen；
         默认组首项列出全部成员，其余成员标注“已并入标签组”，newTab 项标注独占标签/窗口。
         返回校验失败（含 app 解析失败与目录不存在）的项数，供调用方决定退出码。
@@ -1627,7 +1832,6 @@ function Show-AsDryRun {
     }
 
     $readyCount = 0
-    $pendingCount = 0
     $failedCount = 0
 
     for ($i = 0; $i -lt $Items.Count; $i++) {
@@ -1677,10 +1881,9 @@ function Show-AsDryRun {
                 Write-ToolkitMessage -Kind Info -Text "$prefix command $detail（未归入标签组）"
             }
             $readyCount++
-        } else {
-            $detail = Get-AsItemDetail -Item $item
-            Write-ToolkitMessage -Kind Info -Text "$prefix $($item.Type) $detail（尚未实现）"
-            $pendingCount++
+        } elseif ($item.Type -eq 'vscode') {
+            Write-ToolkitMessage -Kind Info -Text "$prefix vscode $(Get-AsItemDetail -Item $item)"
+            $readyCount++
         }
 
         if ($i -lt $Items.Count - 1) {
@@ -1691,7 +1894,7 @@ function Show-AsDryRun {
         }
     }
 
-    Write-ToolkitMessage -Kind Info -Text "DryRun 汇总：可执行 $readyCount 项（含已解析的 app、url 与 command），待后续工单实现 $pendingCount 项（vscode），校验失败 $failedCount 项"
+    Write-ToolkitMessage -Kind Info -Text "DryRun 汇总：可执行 $readyCount 项（含已解析的 app、url、command 与 vscode），校验失败 $failedCount 项"
     Write-ToolkitMessage -Kind Muted -Text '未启动任何程序，未写日志。'
     return $failedCount
 }
@@ -1742,6 +1945,9 @@ $items = @(
 
 # app 项在 DryRun 与执行前统一解析为可启动目标，DryRun 与执行共用同一结果
 $null = Initialize-AsAppTargets -Items $items
+
+# vscode 项在 DryRun 与执行前统一解析路径或最近目录；失败原因在 DryRun 中可见
+$null = Initialize-AsVsCodeTargets -Items $items
 
 # url 项在 DryRun 与执行前统一解析默认浏览器；解析失败只影响执行方式（退化）
 $null = Initialize-AsUrlTargets -Items $items
