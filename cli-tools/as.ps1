@@ -7,9 +7,11 @@
     （兼容 .json），用 -c 可指定命名配置（如 as-shopee）或按路径指定配置，
     一次运行只使用一份启动配置。
 
-    本版本实现 folder（用资源管理器打开目录）与 sleep（显式等待）两类启动项；
-    app、url、command、vscode 完成解析与校验后标记为失败，并提示该类型将在后续工单实现。
-    单个启动项失败不会中断清单，结束时给出成功/失败汇总并按结果设置退出码。
+    本版本实现 app（名称启动/路径启动）、folder（用资源管理器打开目录）与
+    sleep（显式等待）三类启动项；url、command、vscode 完成解析与校验后标记为失败，
+    并提示该类型将在后续工单实现。名称启动先按快捷方式文件名精确匹配，无精确命中时
+    改用子串匹配；无命中或多候选时该项失败。单个启动项失败不会中断清单，结束时给出
+    成功/失败汇总并按结果设置退出码。
 
 .PARAMETER Config
     启动配置的短名或路径
@@ -19,7 +21,8 @@
           -c .\as-shopee.config.jsonc、-c C:\configs\as-shopee.config.json
 
 .PARAMETER DryRun
-    只打印解析计划与每项间隔规则，不启动任何程序、不写日志
+    只打印解析计划与每项间隔规则（app 显示命中的快捷方式与目标路径），
+    不启动任何程序、不写日志
 
 .PARAMETER SkipTopMost
     跳过置顶阶段；置顶由后续工单实现，本版本无实际效果
@@ -38,7 +41,7 @@
 
 .EXAMPLE
     as -DryRun
-    预演默认启动配置，只打印解析计划与间隔规则
+    预演默认启动配置，打印解析计划、app 命中与间隔规则
 
 .EXAMPLE
     as -c .\as-shopee.config.jsonc -DryRun -SkipTopMost
@@ -46,7 +49,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.0.0
+    Version: 1.1.0
 #>
 
 param(
@@ -77,7 +80,7 @@ $helpSections = @(
         'as                              执行默认启动配置 as.config'
         'as -c as-shopee                 执行命名启动配置（短名/带 .config/完整文件名均可）'
         'as -c .\as-shopee.config.jsonc  按路径指定启动配置（相对路径相对 cli-tools 目录）'
-        'as -DryRun                      只打印解析计划，不启动程序、不写日志'
+        'as -DryRun                      只打印解析计划（含 app 命中与目标），不启动程序、不写日志'
         'as -SkipTopMost                 跳过置顶阶段（置顶由后续工单实现）'
         'as -h                           显示帮助信息'
     ) }
@@ -88,7 +91,7 @@ $helpSections = @(
         '未知顶层字段只警告；配置缺失或 JSON/顶层结构错误时直接退出 1。'
     ) }
     @{ Title = '启动项'; Lines = @(
-        'app      name 或 path（二者互斥）              名称启动/路径启动（后续工单实现）'
+        'app      name 或 path（二者互斥）              名称启动/路径启动（本版本已实现）'
         'url      urls（字符串或字符串数组）            默认浏览器多标签（后续工单实现）'
         'folder   path                                  资源管理器打开目录（本版本已实现）'
         'command  command，可选 cwd/newTab/keepOpen     默认终端执行（后续工单实现）'
@@ -96,7 +99,11 @@ $helpSections = @(
         'sleep    ms（正整数）                          显式等待（本版本已实现）'
         '公共可选字段：delayMs（覆盖本项之后的间隔）、topMost（仅 app/vscode，置顶由后续工单实现）。'
         '休眠项不接受 delayMs/topMost，出现时警告并忽略。'
+        '名称启动扫描用户与机器开始菜单的 .lnk：快捷方式文件名精确匹配优先，否则子串匹配；'
+        '无命中或多候选时该项失败，候选会写进失败原因。'
+        '路径启动要求 .exe 或 .lnk 且路径存在；.lnk 同样解析目标以推导进程名。'
         '路径会先展开 %VAR% 环境变量；相对路径相对启动配置所在目录（cli-tools）解析。'
+        'app 启动后轮询等待主窗口最多 10 秒再进入下一项，不抢焦点；超时记为成功并警告。'
     ) }
     @{ Title = '示例'; Lines = @(
         'as -DryRun                      预演默认配置，检查解析结果与间隔'
@@ -117,6 +124,8 @@ if ($Help) {
 $script:ScriptDir = $PSScriptRoot
 $script:DefaultConfigName = 'as.config'
 $script:DefaultDelayMs = 1000
+$script:AsMainWindowTimeoutMs = 10000
+$script:AsMainWindowPollMs = 100
 
 # ============================================================
 # 配置解析
@@ -474,6 +483,298 @@ function Get-AsItemModel {
     return $model
 }
 
+# ============================================================
+# app 目标解析（名称启动与路径启动）
+# ============================================================
+
+function Get-AsStartMenuShortcuts {
+    <#
+    .SYNOPSIS
+        递归收集用户与机器开始菜单中的 .lnk 快捷方式
+    .DESCRIPTION
+        扫描当前用户与所有用户的开始菜单 Programs 目录，返回文件信息数组；
+        目录不存在或无法读取时跳过，不视为错误。
+    .OUTPUTS
+        System.IO.FileInfo 数组（扩展名 .lnk）
+    #>
+    $roots = @()
+    $userStartMenu = [Environment]::GetFolderPath('StartMenu')
+    if (-not [string]::IsNullOrWhiteSpace($userStartMenu)) {
+        $roots += Join-Path $userStartMenu 'Programs'
+    }
+    $commonStartMenu = [Environment]::GetFolderPath('CommonStartMenu')
+    if (-not [string]::IsNullOrWhiteSpace($commonStartMenu)) {
+        $roots += Join-Path $commonStartMenu 'Programs'
+    }
+
+    $shortcuts = @()
+    foreach ($root in $roots) {
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        $shortcuts += @(
+            Get-ChildItem -LiteralPath $root -File -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.Extension -eq '.lnk' }
+        )
+    }
+    return $shortcuts
+}
+
+function Get-AsProcessNameFromTarget {
+    <#
+    .SYNOPSIS
+        从快捷方式目标路径推导进程名
+    .DESCRIPTION
+        TargetPath 通常是纯路径，偶尔带引号或追加参数；这里先截取到 .exe 结尾，
+        仅当结果确为可执行文件时返回文件名（无扩展名），否则返回空字符串。
+    .PARAMETER TargetPath
+        快捷方式的目标路径
+    #>
+    param([string]$TargetPath)
+
+    if ([string]::IsNullOrWhiteSpace($TargetPath)) { return '' }
+
+    $value = $TargetPath.Trim()
+    if ($value.StartsWith('"')) {
+        $end = $value.IndexOf('"', 1)
+        if ($end -gt 1) {
+            $value = $value.Substring(1, $end - 1)
+        }
+    } else {
+        $exeIndex = $value.IndexOf('.exe', [System.StringComparison]::OrdinalIgnoreCase)
+        if ($exeIndex -ge 0) {
+            $value = $value.Substring(0, $exeIndex + 4)
+        }
+    }
+
+    if ([System.IO.Path]::GetExtension($value) -ine '.exe') { return '' }
+    return [System.IO.Path]::GetFileNameWithoutExtension($value)
+}
+
+function Resolve-AsShortcutInfo {
+    <#
+    .SYNOPSIS
+        用 WScript.Shell 解析快捷方式的目标路径与进程名
+    .DESCRIPTION
+        COM 解析失败或 TargetPath 为空时不抛异常：TargetKnown 为 $false，
+        快捷方式本身仍可由 ShellExecute 正常启动，只是无法用于窗口等待。
+    .PARAMETER ShortcutPath
+        .lnk 文件路径
+    .OUTPUTS
+        PSCustomObject：TargetPath / TargetKnown / ProcessName
+    #>
+    param([string]$ShortcutPath)
+
+    $info = [PSCustomObject]@{
+        TargetPath  = ''
+        TargetKnown = $false
+        ProcessName = ''
+    }
+
+    if (-not (Test-Path -LiteralPath $ShortcutPath -PathType Leaf)) { return $info }
+
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($ShortcutPath)
+        $target = [string]$shortcut.TargetPath
+        if (-not [string]::IsNullOrWhiteSpace($target)) {
+            $target = [System.Environment]::ExpandEnvironmentVariables($target.Trim())
+            $info.TargetPath = $target
+            $info.TargetKnown = $true
+            $info.ProcessName = Get-AsProcessNameFromTarget -TargetPath $target
+        }
+    } catch {
+        # 目标未知不影响启动：.lnk 仍可由 Start-Process 交给 ShellExecute 打开
+        $null = $_
+    } finally {
+        if ($shell) {
+            try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } catch { $null = $_ }
+        }
+    }
+    return $info
+}
+
+function Find-AsShortcutByName {
+    <#
+    .SYNOPSIS
+        按快捷方式名称查找开始菜单快捷方式
+    .DESCRIPTION
+        大小写不敏感：先比较去掉 .lnk 后的完整文件名，精确命中优先；
+        只有无精确命中时才做子串匹配。返回命中类型与候选列表。
+    .PARAMETER Name
+        启动配置中的 name
+    .PARAMETER Shortcuts
+        Get-AsStartMenuShortcuts 返回的快捷方式数组
+    .OUTPUTS
+        PSCustomObject：MatchType（Exact/Fuzzy/None）/ Candidates（FileInfo 数组）
+    #>
+    param(
+        [string]$Name,
+        [object[]]$Shortcuts = @()
+    )
+
+    $trimmed = $Name.Trim()
+    $exact = @(
+        $Shortcuts | Where-Object {
+            [string]::Equals(
+                [System.IO.Path]::GetFileNameWithoutExtension($_.Name),
+                $trimmed,
+                [System.StringComparison]::OrdinalIgnoreCase)
+        } | Sort-Object FullName
+    )
+    if ($exact.Count -gt 0) {
+        return [PSCustomObject]@{ MatchType = 'Exact'; Candidates = @($exact) }
+    }
+
+    $fuzzy = @(
+        $Shortcuts | Where-Object {
+            ([System.IO.Path]::GetFileNameWithoutExtension($_.Name)).IndexOf(
+                $trimmed, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        } | Sort-Object FullName
+    )
+    return [PSCustomObject]@{
+        MatchType  = if ($fuzzy.Count -gt 0) { 'Fuzzy' } else { 'None' }
+        Candidates = @($fuzzy)
+    }
+}
+
+function Get-AsShortcutCandidateText {
+    <#
+    .SYNOPSIS
+        把候选快捷方式格式化为失败原因中的一行文本
+    .PARAMETER Candidates
+        快捷方式 FileInfo 数组
+    .PARAMETER Max
+        最多列出的路径数，其余以数量概括
+    #>
+    param(
+        [object[]]$Candidates = @(),
+        [int]$Max = 6
+    )
+
+    $paths = @($Candidates | ForEach-Object { $_.FullName })
+    if ($paths.Count -le $Max) { return ($paths -join '、') }
+    $head = ($paths | Select-Object -First $Max) -join '、'
+    return "$head 等 $($paths.Count) 个"
+}
+
+function Resolve-AsAppTarget {
+    <#
+    .SYNOPSIS
+        把一个有效 app 启动项解析为可启动目标
+    .DESCRIPTION
+        名称启动按快捷键名称在开始菜单中查找（精确优先、子串兜底），
+        多候选或无命中即失败；命中后解析 TargetPath 供展示与窗口等待。
+        路径启动校验文件存在且为 .exe 或 .lnk，.lnk 同样解析目标。
+    .PARAMETER Item
+        已通过字段校验的 app 启动项模型
+    .PARAMETER Shortcuts
+        开始菜单快捷方式数组，由调用方扫描一次后复用
+    .OUTPUTS
+        PSCustomObject：Success / Reason / Mode / LaunchPath / TargetPath /
+        TargetKnown / ProcessName
+    #>
+    param(
+        [Parameter(Mandatory = $true)][object]$Item,
+        [object[]]$Shortcuts = @()
+    )
+
+    $result = [PSCustomObject]@{
+        Success     = $false
+        Reason      = ''
+        Mode        = ''
+        LaunchPath  = ''
+        TargetPath  = ''
+        TargetKnown = $false
+        ProcessName = ''
+    }
+
+    if ($Item.Data.ContainsKey('Name')) {
+        $result.Mode = 'Name'
+        $name = [string]$Item.Data.Name
+        $match = Find-AsShortcutByName -Name $name -Shortcuts $Shortcuts
+        if ($match.MatchType -eq 'None') {
+            $result.Reason = "未在开始菜单中找到名称包含 '$name' 的快捷方式"
+            return $result
+        }
+        if ($match.Candidates.Count -gt 1) {
+            $label = if ($match.MatchType -eq 'Exact') { '精确' } else { '模糊' }
+            $candidateText = Get-AsShortcutCandidateText -Candidates $match.Candidates
+            $result.Reason = "名称 '$name' $($label)匹配到多个开始菜单快捷方式：$candidateText"
+            return $result
+        }
+
+        $shortcut = $match.Candidates[0]
+        $result.LaunchPath = $shortcut.FullName
+        $info = Resolve-AsShortcutInfo -ShortcutPath $shortcut.FullName
+        $result.TargetPath = $info.TargetPath
+        $result.TargetKnown = $info.TargetKnown
+        $result.ProcessName = $info.ProcessName
+        $result.Success = $true
+        return $result
+    }
+
+    $result.Mode = 'Path'
+    $path = [string]$Item.Data.Path
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        $result.Reason = "路径不存在：$path"
+        return $result
+    }
+    $extension = [System.IO.Path]::GetExtension($path).ToLowerInvariant()
+    if ($extension -notin @('.exe', '.lnk')) {
+        $result.Reason = "不支持的文件类型（仅支持 .exe 与 .lnk）：$path"
+        return $result
+    }
+
+    $result.LaunchPath = $path
+    if ($extension -eq '.lnk') {
+        $info = Resolve-AsShortcutInfo -ShortcutPath $path
+        $result.TargetPath = $info.TargetPath
+        $result.TargetKnown = $info.TargetKnown
+        $result.ProcessName = $info.ProcessName
+    } else {
+        $result.TargetPath = $path
+        $result.TargetKnown = $true
+        $result.ProcessName = [System.IO.Path]::GetFileNameWithoutExtension($path)
+    }
+    $result.Success = $true
+    return $result
+}
+
+function Initialize-AsAppTargets {
+    <#
+    .SYNOPSIS
+        在 DryRun 与执行之前统一解析所有有效 app 启动项
+    .DESCRIPTION
+        只有存在名称启动项时才扫描一次开始菜单，所有 app 项共用该结果。
+        解析成功把结果写入 Data.Launch；失败则把启动项标记为 Failed 并给出原因，
+        由现有引擎按失败项计数、跳过并继续后续项。
+    .PARAMETER Items
+        启动项模型数组（就地修改）
+    #>
+    param([object[]]$Items)
+
+    $nameItems = @(
+        $Items | Where-Object {
+            $_.Type -eq 'app' -and $_.Status -eq 'Valid' -and $_.Data.ContainsKey('Name')
+        }
+    )
+    $shortcuts = @()
+    if ($nameItems.Count -gt 0) {
+        $shortcuts = @(Get-AsStartMenuShortcuts)
+    }
+
+    foreach ($item in $Items) {
+        if ($item.Type -ne 'app' -or $item.Status -ne 'Valid') { continue }
+        $resolution = Resolve-AsAppTarget -Item $item -Shortcuts $shortcuts
+        if ($resolution.Success) {
+            $item.Data.Launch = $resolution
+        } else {
+            $item.Status = 'Failed'
+            $item.Reason = $resolution.Reason
+        }
+    }
+}
+
 function Get-AsItemDetail {
     <#
     .SYNOPSIS
@@ -487,7 +788,26 @@ function Get-AsItemDetail {
         'folder' { return "打开目录：$($Item.Data.Path)" }
         'sleep' { return "等待 $($Item.Data.Ms) 毫秒" }
         'app' {
-            $text = if ($Item.Data.ContainsKey('Name')) { "名称：$($Item.Data.Name)" } else { "路径：$($Item.Data.Path)" }
+            if ($Item.Data.ContainsKey('Launch')) {
+                $launch = $Item.Data.Launch
+                if ($launch.Mode -eq 'Name') {
+                    $text = "名称启动：$($Item.Data.Name) → $($launch.LaunchPath)"
+                    if ($launch.TargetKnown) {
+                        $text += "；目标：$($launch.TargetPath)"
+                    } else {
+                        $text += '；目标未知（无法解析快捷方式目标，仍可启动）'
+                    }
+                } else {
+                    $text = "路径启动：$($launch.LaunchPath)"
+                    if ($launch.TargetKnown -and $launch.LaunchPath -ne $launch.TargetPath) {
+                        $text += "；目标：$($launch.TargetPath)"
+                    } elseif (-not $launch.TargetKnown) {
+                        $text += '；目标未知（无法解析快捷方式目标，仍可启动）'
+                    }
+                }
+            } else {
+                $text = if ($Item.Data.ContainsKey('Name')) { "名称：$($Item.Data.Name)" } else { "路径：$($Item.Data.Path)" }
+            }
             if ($Item.TopMost) { $text += '；置顶：是' }
             return $text
         }
@@ -567,38 +887,104 @@ function Get-AsIntervalDescription {
 # 执行与预演
 # ============================================================
 
+function Wait-AsAppMainWindow {
+    <#
+    .SYNOPSIS
+        轮询目标进程是否出现主窗口
+    .DESCRIPTION
+        按进程名查找任意实例的主窗口（单实例应用会让新启动的进程立刻退出，
+        窗口由已有实例展示，因此不能只看 Start-Process 返回的进程）。
+        只读检测，不调用任何置前/抢焦点 API；超时返回 $false。
+    .PARAMETER ProcessName
+        目标进程名（不含 .exe）
+    .PARAMETER TimeoutMs
+        最长等待毫秒数
+    .PARAMETER IntervalMs
+        轮询间隔毫秒数
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$ProcessName,
+        [int]$TimeoutMs = 10000,
+        [int]$IntervalMs = 100
+    )
+
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    while ($true) {
+        $candidate = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
+            Where-Object {
+                try { $_.Refresh(); $_.MainWindowHandle.ToInt64() -ne 0 } catch { $false }
+            } |
+            Select-Object -First 1
+        if ($candidate) { return $true }
+        if ((Get-Date) -ge $deadline) { return $false }
+        Start-Sleep -Milliseconds $IntervalMs
+    }
+}
+
 function Invoke-AsItem {
     <#
     .SYNOPSIS
         执行单个启动项
     .DESCRIPTION
-        本版本只执行 folder 与 sleep；其余四类返回失败并提示后续工单实现。
-        返回 PSCustomObject：Success / Message。
+        本版本执行 app、folder 与 sleep；其余三类返回失败并提示后续工单实现。
+        app 启动后轮询等待主窗口最多 10 秒（不抢焦点），超时仍记为成功，
+        由 Warning 字段提示调用方输出警告。
+        返回 PSCustomObject：Success / Message / Warning。
     .PARAMETER Item
-        已校验的启动项模型
+        已校验且 app 项已完成目标解析的启动项模型
     #>
     param([object]$Item)
 
     switch ($Item.Type) {
         'sleep' {
             Start-Sleep -Milliseconds ([int]$Item.Data.Ms)
-            return [PSCustomObject]@{ Success = $true; Message = "等待 $($Item.Data.Ms) 毫秒" }
+            return [PSCustomObject]@{ Success = $true; Message = "等待 $($Item.Data.Ms) 毫秒"; Warning = '' }
         }
         'folder' {
             $path = [string]$Item.Data.Path
             if (-not (Test-Path -LiteralPath $path -PathType Container)) {
-                return [PSCustomObject]@{ Success = $false; Message = "目录不存在：$path" }
+                return [PSCustomObject]@{ Success = $false; Message = "目录不存在：$path"; Warning = '' }
             }
             try {
                 $explorer = Join-Path $env:SystemRoot 'explorer.exe'
                 Start-Process -FilePath $explorer -ArgumentList ('"{0}"' -f $path) -ErrorAction Stop
-                return [PSCustomObject]@{ Success = $true; Message = "打开目录：$path" }
+                return [PSCustomObject]@{ Success = $true; Message = "打开目录：$path"; Warning = '' }
             } catch {
-                return [PSCustomObject]@{ Success = $false; Message = "打开目录失败：$($_.Exception.Message)" }
+                return [PSCustomObject]@{ Success = $false; Message = "打开目录失败：$($_.Exception.Message)"; Warning = '' }
             }
         }
+        'app' {
+            $launch = $Item.Data.Launch
+            if (-not $launch) {
+                return [PSCustomObject]@{ Success = $false; Message = '未解析出可启动目标'; Warning = '' }
+            }
+
+            try {
+                # 直接启动 .lnk/.exe，保留快捷方式自身的参数与起始位置
+                Start-Process -FilePath $launch.LaunchPath -ErrorAction Stop
+            } catch {
+                return [PSCustomObject]@{ Success = $false; Message = "启动失败：$($_.Exception.Message)"; Warning = '' }
+            }
+
+            $message = if ($launch.Mode -eq 'Name') {
+                "启动快捷方式：$($launch.LaunchPath)"
+            } else {
+                "启动：$($launch.LaunchPath)"
+            }
+
+            $warning = ''
+            if ($launch.ProcessName) {
+                $detected = Wait-AsAppMainWindow -ProcessName $launch.ProcessName `
+                    -TimeoutMs $script:AsMainWindowTimeoutMs -IntervalMs $script:AsMainWindowPollMs
+                if (-not $detected) {
+                    $seconds = [int]($script:AsMainWindowTimeoutMs / 1000)
+                    $warning = "未在 $seconds 秒内检测到主窗口（进程 $($launch.ProcessName)）"
+                }
+            }
+            return [PSCustomObject]@{ Success = $true; Message = $message; Warning = $warning }
+        }
         default {
-            return [PSCustomObject]@{ Success = $false; Message = '该类型将在后续工单实现' }
+            return [PSCustomObject]@{ Success = $false; Message = '该类型将在后续工单实现'; Warning = '' }
         }
     }
 }
@@ -608,9 +994,10 @@ function Show-AsDryRun {
     .SYNOPSIS
         打印启动清单的解析计划与间隔规则，不启动任何程序、不写日志
     .DESCRIPTION
-        逐项打印序号、类型与解析结果；folder 显示展开后的路径，
-        sleep 显示毫秒数，app/url/command/vscode 显示配置摘要并标注尚未实现。
-        返回校验失败（含目录不存在）的项数，供调用方决定退出码。
+        逐项打印序号、类型与解析结果；app 显示命中的快捷方式与目标路径
+        （或路径启动解析后的路径），folder 显示展开后的路径，sleep 显示毫秒数，
+        url/command/vscode 显示配置摘要并标注尚未实现。
+        返回校验失败（含 app 解析失败与目录不存在）的项数，供调用方决定退出码。
     .PARAMETER Items
         启动项模型数组
     .PARAMETER DefaultDelayMs
@@ -647,6 +1034,9 @@ function Show-AsDryRun {
         if ($item.Status -eq 'Failed') {
             Write-ToolkitMessage -Kind Warning -Text "$prefix $($item.Type) 校验失败：$($item.Reason)"
             $failedCount++
+        } elseif ($item.Type -eq 'app') {
+            Write-ToolkitMessage -Kind Info -Text "$prefix app $(Get-AsItemDetail -Item $item)"
+            $readyCount++
         } elseif ($item.Type -eq 'folder') {
             $exists = Test-Path -LiteralPath $item.Data.Path -PathType Container
             if ($exists) {
@@ -674,7 +1064,7 @@ function Show-AsDryRun {
         }
     }
 
-    Write-ToolkitMessage -Kind Info -Text "DryRun 汇总：可执行 $readyCount 项，待后续工单实现 $pendingCount 项，校验失败 $failedCount 项"
+    Write-ToolkitMessage -Kind Info -Text "DryRun 汇总：可执行 $readyCount 项（含解析成功的 app），待后续工单实现 $pendingCount 项，校验失败 $failedCount 项"
     Write-ToolkitMessage -Kind Muted -Text '未启动任何程序，未写日志。'
     return $failedCount
 }
@@ -723,6 +1113,9 @@ $items = @(
     }
 )
 
+# app 项在 DryRun 与执行前统一解析为可启动目标，DryRun 与执行共用同一结果
+$null = Initialize-AsAppTargets -Items $items
+
 if ($DryRun) {
     $failedCount = Show-AsDryRun -Items $items -DefaultDelayMs $globalDelayMs -ConfigPath $configInfo.Path -SkipTopMostStage ([bool]$SkipTopMost)
     if ($failedCount -gt 0) { exit 1 }
@@ -743,7 +1136,7 @@ for ($i = 0; $i -lt $items.Count; $i++) {
     $prefix = "[$($item.Index)/$($items.Count)]"
 
     $result = if ($item.Status -eq 'Failed') {
-        [PSCustomObject]@{ Success = $false; Message = $item.Reason }
+        [PSCustomObject]@{ Success = $false; Message = $item.Reason; Warning = '' }
     } else {
         Invoke-AsItem -Item $item
     }
@@ -762,6 +1155,13 @@ for ($i = 0; $i -lt $items.Count; $i++) {
         Write-ToolkitMessage -Kind Warning -Text $line
     }
     Write-ToolkitLogLine -Tool 'as' -Text $line
+
+    # 成功但主窗口未在等待期内出现：不算失败，控制台与日志都提示
+    if (-not [string]::IsNullOrWhiteSpace($result.Warning)) {
+        $warningLine = "$prefix $($item.Type) 警告：$($result.Warning)"
+        Write-ToolkitMessage -Kind Warning -Text $warningLine
+        Write-ToolkitLogLine -Tool 'as' -Text $warningLine
+    }
 
     # 相邻项间隔：休眠项自身已在执行阶段等待，任一端为休眠项时不再额外等待
     if ($i -lt $items.Count - 1) {
