@@ -96,7 +96,7 @@ $helpSections = @(
         'sleep    ms（正整数）                          显式等待（本版本已实现）'
         '公共可选字段：delayMs（覆盖本项之后的间隔）、topMost（仅 app/vscode，置顶由后续工单实现）。'
         '休眠项不接受 delayMs/topMost，出现时警告并忽略。'
-        '路径会先展开 %VAR% 环境变量；相对路径相对当前工作目录解析。'
+        '路径会先展开 %VAR% 环境变量；相对路径相对启动配置所在目录（cli-tools）解析。'
     ) }
     @{ Title = '示例'; Lines = @(
         'as -DryRun                      预演默认配置，检查解析结果与间隔'
@@ -253,7 +253,8 @@ function Get-AsItemModel {
     #>
     param(
         [object]$Raw,
-        [int]$Index
+        [int]$Index,
+        [string]$BaseDir
     )
 
     $model = [PSCustomObject]@{
@@ -348,7 +349,7 @@ function Get-AsItemModel {
                 }
             } else {
                 if ($Raw['path'] -is [string] -and -not [string]::IsNullOrWhiteSpace($Raw['path'])) {
-                    $model.Data.Path = $Raw['path'].Trim()
+                    $model.Data.Path = [string](Resolve-ToolkitPathValue -Path $Raw['path'].Trim() -Base $BaseDir)
                 } else {
                     $reasons += 'path 必须是非空字符串'
                 }
@@ -394,8 +395,8 @@ function Get-AsItemModel {
             } elseif ($Raw['path'] -isnot [string] -or [string]::IsNullOrWhiteSpace($Raw['path'])) {
                 $reasons += 'path 必须是非空字符串'
             } else {
-                # 相对路径沿用 Resolve-ToolkitPathValue 的约定：不传 -Base，相对当前工作目录
-                $model.Data.Path = [string](Resolve-ToolkitPathValue -Path $Raw['path'].Trim())
+                # 相对路径以启动配置所在目录（cli-tools）为基准，避免登录时 cwd 为 System32
+                $model.Data.Path = [string](Resolve-ToolkitPathValue -Path $Raw['path'].Trim() -Base $BaseDir)
             }
         }
         'command' {
@@ -408,7 +409,7 @@ function Get-AsItemModel {
             if ($Raw.ContainsKey('cwd')) {
                 if ($Raw['cwd'] -is [string]) {
                     if (-not [string]::IsNullOrWhiteSpace($Raw['cwd'])) {
-                        $model.Data.Cwd = $Raw['cwd'].Trim()
+                        $model.Data.Cwd = [string](Resolve-ToolkitPathValue -Path $Raw['cwd'].Trim() -Base $BaseDir)
                     }
                 } else {
                     $reasons += 'cwd 必须是字符串'
@@ -448,7 +449,7 @@ function Get-AsItemModel {
                 }
             } else {
                 if ($Raw['path'] -is [string] -and -not [string]::IsNullOrWhiteSpace($Raw['path'])) {
-                    $model.Data.Path = $Raw['path'].Trim()
+                    $model.Data.Path = [string](Resolve-ToolkitPathValue -Path $Raw['path'].Trim() -Base $BaseDir)
                 } else {
                     $reasons += 'path 必须是非空字符串'
                 }
@@ -718,7 +719,7 @@ try {
 
 $items = @(
     for ($i = 0; $i -lt $rawItems.Count; $i++) {
-        Get-AsItemModel -Raw $rawItems[$i] -Index ($i + 1)
+        Get-AsItemModel -Raw $rawItems[$i] -Index ($i + 1) -BaseDir (Split-Path -Parent $configInfo.Path)
     }
 )
 
@@ -781,5 +782,3 @@ Write-ToolkitLogLine -Tool 'as' -Text "$summary（启动配置：$($configInfo.P
 
 if ($failureCount -gt 0) { exit 1 }
 exit 0
-</content>
-</file_path>
