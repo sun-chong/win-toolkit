@@ -12,8 +12,11 @@
     管理器打开目录）、command（默认终端标签组执行）、vscode（VS Code 项目）与
     sleep（显式等待）六类启动项。url 读取系统默认浏览器可执行文件，把该项全部网址
     一次性作为参数交给浏览器，使多个网址在同一窗口以多标签打开；解析不到默认浏览器
-    时退化为逐个打开网址，不算失败。名称启动先按快捷方式文件名精确匹配，无精确命中
-    时改用子串匹配；无命中或多候选时该项失败。
+    时退化为逐个打开网址，不算失败。名称启动同时匹配用户与机器开始菜单的 .lnk 快捷
+    方式和商店应用（Get-StartApps 中 AppID 含 ! 的 UWP 条目）：先按名称精确匹配，
+    无精确命中时改用子串匹配；无命中或多候选时该项失败，失败原因列出候选。命中 .lnk
+    时直接启动快捷方式并解析目标供窗口等待；命中 UWP 时用 explorer.exe 启动
+    shell:AppsFolder\<AppID>，不等待窗口、不参与置顶（配置 topMost 时警告跳过）。
 
     vscode 的 path 直接以 code -n 打开新窗口；name 匹配 VS Code 最近打开目录，目录名
     精确匹配优先，无精确命中时改用子串匹配，唯一命中才打开；无命中或多候选时该项失败，
@@ -44,10 +47,11 @@
           -c .\as-shopee.config.jsonc、-c C:\configs\foo.json
 
 .PARAMETER DryRun
-    只打印解析计划与每项间隔规则（app 显示命中的快捷方式与目标路径，
-    url 显示默认浏览器可执行文件与网址清单，command 显示默认终端判定与
-    标签组划分，vscode 显示解析后的路径或匹配到的最近目录），末尾给出置顶计划摘要
-    （哪些序号会被激活与激活顺序），不启动任何程序、不激活任何窗口、不写日志
+    只打印解析计划与每项间隔规则（app 显示命中的快捷方式与目标路径，名称启动命中
+    UWP 时显示名称、AppID 与 shell:AppsFolder 启动路径，url 显示默认浏览器可执行
+    文件与网址清单，command 显示默认终端判定与标签组划分，vscode 显示解析后的路径
+    或匹配到的最近目录），末尾给出置顶计划摘要（哪些序号会被激活与激活顺序），
+    不启动任何程序、不激活任何窗口、不写日志
 
 .PARAMETER SkipTopMost
     跳过置顶阶段：全部启动项执行完成后不再把标记 topMost 的 app/vscode 窗口切到前台
@@ -74,7 +78,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.5.3
+    Version: 1.6.0
 #>
 
 param(
@@ -105,7 +109,7 @@ $helpSections = @(
         'as                              执行默认启动配置 as.config'
         'as -c as-shopee                 执行命名启动配置（短名/带 .config/完整文件名均可）'
         'as -c .\as-shopee.config.jsonc  按路径指定启动配置（相对路径相对 cli-tools 目录；路径指向存在的 JSON/JSONC 文件时直接使用）'
-        'as -DryRun                      只打印解析计划（含默认终端、标签组划分与 vscode 匹配），不启动程序、不写日志'
+        'as -DryRun                      只打印解析计划（含默认终端、标签组划分、vscode 匹配与 UWP 名称启动），不启动程序、不写日志'
         'as -SkipTopMost                 跳过置顶阶段（全部启动项完成后不激活任何窗口）'
         'as -h                           显示帮助信息'
     ) }
@@ -118,7 +122,7 @@ $helpSections = @(
         '未知顶层字段只警告；配置缺失或 JSON/顶层结构错误时直接退出 1。'
     ) }
     @{ Title = '启动项'; Lines = @(
-        'app      name 或 path（二者互斥）              名称启动/路径启动（本版本已实现）'
+        'app      name 或 path（二者互斥）              名称启动（开始菜单快捷方式或商店应用）/路径启动'
         'url      urls（字符串或字符串数组）            默认浏览器多标签（本版本已实现）'
         'folder   path                                  资源管理器打开目录（本版本已实现）'
         'command  command，可选 cwd/newTab/keepOpen     默认终端标签组执行（本版本已实现）'
@@ -131,24 +135,28 @@ $helpSections = @(
         '支持标签时所有未标记 newTab 的命令并入默认标签组，在第一个非 newTab 命令项处一次性提交给同一个 pwsh 会话，'
         '按配置顺序执行，不同 cwd 用 Set-Location 串联；newTab: true 的命令各自独占一个标签。'
         '不支持标签时默认组改为同一新窗口内顺序执行，newTab 命令各自新窗口。'
-        '后续非 newTab 命令项到位置时只记录“已并入标签组”，不再启动新终端；组内命令连续执行，不受 delayMs 影响，'
+        '后续非 newTab 命令项到位置时只记录“已并入标签组”，不再启动新终端；组内命令连续执行，不受顶层 delayMs 影响，'
         '但每个 command 项仍按清单位置参与相邻间隔。'
         'keepOpen 默认 true（保留终端），组内任一项为 true 即保留，全部为 false 才在命令结束后关闭。'
         'vscode 的 path 用 code -n 打开新窗口；name 匹配 VS Code 最近打开目录（storage.json），'
         '目录名精确匹配优先，否则子串匹配；唯一命中才打开，无命中或多候选时该项失败，候选写进失败原因。'
         'code 命令不存在或启动异常时该项失败。'
-        '公共可选字段：delayMs（覆盖本项之后的间隔）、topMost（仅 app/vscode，执行完成后切到前台一次）。'
-        '休眠项不接受 delayMs/topMost，出现时警告并忽略；休眠项校验失败（如 ms 非法）时该项跳过、'
-        '不执行等待，也不替代相邻间隔，按普通项规则使用默认间隔或前一项 delayMs。'
-        '名称启动扫描用户与机器开始菜单的 .lnk：快捷方式文件名精确匹配优先，否则子串匹配；'
-        '无命中或多候选时该项失败，候选会写进失败原因。'
+        '公共可选字段：topMost（仅 app/vscode，执行完成后切到前台一次；名称启动命中 UWP 时无法推导进程名，置顶阶段警告跳过）。'
+        '启动项上的 delayMs 已移除，出现时警告并忽略，普通启动项之间一律使用顶层 delayMs。'
+        '休眠项不接受 topMost，出现时警告并忽略；休眠项校验失败（如 ms 非法）时该项跳过、'
+        '不执行等待，也不替代相邻间隔，按普通项规则使用顶层 delayMs。'
+        '名称启动同时扫描用户与机器开始菜单的 .lnk 和商店应用（Get-StartApps 中 AppID 含 ! 的 UWP 条目）：'
+        '名称精确匹配优先，否则子串匹配；无命中或多候选时该项失败，候选会写进失败原因（.lnk 显示路径，UWP 显示名称与 AppID）。'
+        '命中 .lnk 时直接启动快捷方式并解析目标供窗口等待；命中 UWP 时用 explorer.exe 启动 shell:AppsFolder\<AppID>，'
+        '不等待窗口、不参与置顶（topMost 时警告跳过）；Get-StartApps 调用失败只警告，名称启动继续使用 .lnk。'
         '路径启动要求 .exe 或 .lnk 且路径存在；.lnk 同样解析目标以推导进程名。'
         '路径会先展开 %VAR% 环境变量；相对路径相对启动配置所在目录解析（默认与命名配置都在 cli-tools，因此通常即相对 cli-tools）。'
-        'app 启动后轮询等待主窗口最多 10 秒再进入下一项，不抢焦点；超时记为成功并警告。'
+        'app 启动后轮询等待主窗口最多 10 秒再进入下一项，不抢焦点；超时记为成功并警告（UWP 不等待窗口）。'
     ) }
     @{ Title = '置顶'; Lines = @(
         '全部启动项执行完成后，未指定 -SkipTopMost 时，按配置顺序把标记 topMost 的 app 与 vscode 项窗口切到前台一次。'
         'app：按启动目标的进程名找到主窗口后激活；vscode：在 Code 进程窗口中找标题包含项目目录叶子名的窗口，多个匹配取启动时间最新的。'
+        '名称启动命中 UWP 时无法推导进程名，置顶阶段警告并跳过该项（不影响成功状态与退出码）。'
         '多个置顶项依次激活，最后一个位于最上；只做一次性激活，不改变窗口的永久层级，不做永久置顶。'
         '找不到窗口或激活失败时警告并写日志，不改变该项成功状态、不影响退出码。'
         'folder/url/command/sleep 配置 topMost 时警告并忽略，置顶阶段不尝试。'
@@ -326,7 +334,7 @@ function Get-AsItemModel {
     .PARAMETER Index
         启动项序号，从 1 开始
     .OUTPUTS
-        PSCustomObject：Index / Type / DelayMs / TopMost / Status / Reason / Data
+        PSCustomObject：Index / Type / TopMost / Status / Reason / Data
     #>
     param(
         [object]$Raw,
@@ -337,7 +345,6 @@ function Get-AsItemModel {
     $model = [PSCustomObject]@{
         Index   = $Index
         Type    = '?'
-        DelayMs = $null
         TopMost = $false
         Status  = 'Valid'
         Reason  = ''
@@ -348,6 +355,11 @@ function Get-AsItemModel {
         $model.Status = 'Failed'
         $model.Reason = '启动项必须是 JSON 对象'
         return $model
+    }
+
+    # 启动项级 delayMs 已移除：出现时只警告、不判失败，间隔一律使用顶层 delayMs
+    if ($Raw.ContainsKey('delayMs')) {
+        Write-ToolkitMessage -Kind Warning -Text "警告：启动项 [$Index] 的 delayMs 已移除，仅使用顶层 delayMs 统一间隔"
     }
 
     $typeValue = if ($Raw.ContainsKey('type')) { $Raw['type'] } else { $null }
@@ -361,7 +373,8 @@ function Get-AsItemModel {
     $type = $typeValue.Trim().ToLowerInvariant()
     $model.Type = $type
 
-    # 公共字段 + 当前类型的专属字段；未知字段逐项警告
+    # 公共字段 + 当前类型的专属字段；未知字段逐项警告。
+    # delayMs 已移除但仍列入已知字段：上面已给出专门的“已移除”警告，避免重复报成未知字段。
     $knownKeys = @('type', 'delayMs', 'topMost')
     switch ($type) {
         'app' { $knownKeys += @('name', 'path') }
@@ -382,23 +395,11 @@ function Get-AsItemModel {
     $reasons = @()
 
     if ($type -eq 'sleep') {
-        # 休眠项以自身 ms 替代相邻默认间隔，不接受 delayMs/topMost
-        if ($Raw.ContainsKey('delayMs')) {
-            Write-ToolkitMessage -Kind Warning -Text "警告：启动项 [$Index] 的类型 sleep 不支持 delayMs，已忽略"
-        }
+        # 休眠项以自身 ms 替代相邻默认间隔，不接受 topMost
         if ($Raw.ContainsKey('topMost')) {
             Write-ToolkitMessage -Kind Warning -Text "警告：启动项 [$Index] 的类型 sleep 不支持 topMost，已忽略"
         }
     } else {
-        if ($Raw.ContainsKey('delayMs')) {
-            $delay = 0
-            if (Test-AsIntegerValue -Value $Raw['delayMs'] -Minimum 0 -Result ([ref]$delay)) {
-                $model.DelayMs = $delay
-            } else {
-                $reasons += 'delayMs 必须是非负整数'
-            }
-        }
-
         if ($Raw.ContainsKey('topMost')) {
             if ($type -notin @('app', 'vscode')) {
                 Write-ToolkitMessage -Kind Warning -Text "警告：启动项 [$Index] 的类型 '$type' 不支持 topMost，已忽略"
@@ -586,6 +587,45 @@ function Get-AsStartMenuShortcuts {
     return $shortcuts
 }
 
+function Get-AsUwpStartApps {
+    <#
+    .SYNOPSIS
+        收集可通过 shell:AppsFolder 启动的商店应用（UWP）
+    .DESCRIPTION
+        调用 Get-StartApps 读取系统开始菜单应用清单，只保留 AppID 含 ! 的条目
+        （UWP 包族名 + 入口点，如 Microsoft.WindowsCalculator_8wekyb3d8bbwe!App）；
+        AppID 为文件路径或其他形式的应用交给开始菜单 .lnk 扫描，不在此重复。
+        Get-StartApps 不可用或调用失败时只警告并返回空数组，不影响 .lnk 名称启动。
+    .OUTPUTS
+        PSCustomObject 数组：Name / AppId
+    .EXAMPLE
+        $apps = @(Get-AsUwpStartApps)
+        返回开始菜单中可通过 shell:AppsFolder 启动的商店应用
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
+    #>
+    try {
+        $startApps = @(Get-StartApps -ErrorAction Stop)
+    } catch {
+        Write-ToolkitMessage -Kind Warning -Text "警告：读取商店应用清单失败（$($_.Exception.Message)），名称启动仅使用开始菜单快捷方式"
+        return @()
+    }
+
+    $apps = @()
+    foreach ($app in $startApps) {
+        $name = [string]$app.Name
+        $appId = [string]$app.AppID
+        if ([string]::IsNullOrWhiteSpace($name) -or [string]::IsNullOrWhiteSpace($appId)) { continue }
+        if (-not $appId.Contains('!')) { continue }
+        $apps += [PSCustomObject]@{
+            Name  = $name.Trim()
+            AppId = $appId.Trim()
+        }
+    }
+    return $apps
+}
+
 function Get-AsProcessNameFromTarget {
     <#
     .SYNOPSIS
@@ -661,43 +701,72 @@ function Resolve-AsShortcutInfo {
     return $info
 }
 
-function Find-AsShortcutByName {
+function Find-AsNameCandidates {
     <#
     .SYNOPSIS
-        按快捷方式名称查找开始菜单快捷方式
+        按名称在开始菜单快捷方式与商店应用中查找候选
     .DESCRIPTION
-        大小写不敏感：先比较去掉 .lnk 后的完整文件名，精确命中优先；
-        只有无精确命中时才做子串匹配。返回命中类型与候选列表。
+        候选同时来自 .lnk 快捷方式（按去掉 .lnk 的文件名匹配）与 UWP 商店应用
+        （按 Get-StartApps 的显示名称匹配）；大小写不敏感，精确命中优先，
+        只有无精确命中时才做子串匹配。候选携带 Kind（Shortcut/Uwp）与失败原因
+        展示文本：.lnk 为完整路径，UWP 为名称与 AppID。
     .PARAMETER Name
         启动配置中的 name
     .PARAMETER Shortcuts
         Get-AsStartMenuShortcuts 返回的快捷方式数组
+    .PARAMETER UwpApps
+        Get-AsUwpStartApps 返回的商店应用数组
     .OUTPUTS
-        PSCustomObject：MatchType（Exact/Fuzzy/None）/ Candidates（FileInfo 数组）
+        PSCustomObject：MatchType（Exact/Fuzzy/None）/ Candidates
+    .EXAMPLE
+        Find-AsNameCandidates -Name 'Claude' -Shortcuts $shortcuts -UwpApps $uwpApps
+        返回名称匹配的快捷方式与商店应用候选
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
     #>
     param(
         [string]$Name,
-        [object[]]$Shortcuts = @()
+        [object[]]$Shortcuts = @(),
+        [object[]]$UwpApps = @()
     )
+
+    $candidates = @()
+    foreach ($shortcut in $Shortcuts) {
+        $candidates += [PSCustomObject]@{
+            Kind     = 'Shortcut'
+            Name     = [System.IO.Path]::GetFileNameWithoutExtension($shortcut.Name)
+            Display  = [string]$shortcut.FullName
+            Shortcut = $shortcut
+            UwpName  = ''
+            AppId    = ''
+        }
+    }
+    foreach ($uwp in $UwpApps) {
+        $candidates += [PSCustomObject]@{
+            Kind     = 'Uwp'
+            Name     = [string]$uwp.Name
+            Display  = "$($uwp.Name)（$($uwp.AppId)）"
+            Shortcut = $null
+            UwpName  = [string]$uwp.Name
+            AppId    = [string]$uwp.AppId
+        }
+    }
 
     $trimmed = $Name.Trim()
     $exact = @(
-        $Shortcuts | Where-Object {
-            [string]::Equals(
-                [System.IO.Path]::GetFileNameWithoutExtension($_.Name),
-                $trimmed,
-                [System.StringComparison]::OrdinalIgnoreCase)
-        } | Sort-Object FullName
+        $candidates | Where-Object {
+            [string]::Equals($_.Name, $trimmed, [System.StringComparison]::OrdinalIgnoreCase)
+        } | Sort-Object Display
     )
     if ($exact.Count -gt 0) {
         return [PSCustomObject]@{ MatchType = 'Exact'; Candidates = @($exact) }
     }
 
     $fuzzy = @(
-        $Shortcuts | Where-Object {
-            ([System.IO.Path]::GetFileNameWithoutExtension($_.Name)).IndexOf(
-                $trimmed, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
-        } | Sort-Object FullName
+        $candidates | Where-Object {
+            $_.Name.IndexOf($trimmed, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        } | Sort-Object Display
     )
     return [PSCustomObject]@{
         MatchType  = if ($fuzzy.Count -gt 0) { 'Fuzzy' } else { 'None' }
@@ -710,10 +779,10 @@ function Get-AsCandidateText {
     .SYNOPSIS
         把候选路径格式化为失败原因中的一行文本
     .DESCRIPTION
-        快捷方式与 VS Code 最近目录两类失败原因共用：最多列出 Max 条路径，
+        名称启动候选与 VS Code 最近目录等失败原因共用：最多列出 Max 条展示文本，
         其余以总数概括。
     .PARAMETER Values
-        候选路径数组
+        候选展示文本数组
     .PARAMETER Max
         最多列出的路径数，其余以数量概括
     #>
@@ -732,48 +801,66 @@ function Resolve-AsAppTarget {
     .SYNOPSIS
         把一个有效 app 启动项解析为可启动目标
     .DESCRIPTION
-        名称启动按快捷键名称在开始菜单中查找（精确优先、子串兜底），
-        多候选或无命中即失败；命中后解析 TargetPath 供展示与窗口等待。
+        名称启动在开始菜单快捷方式（.lnk）与商店应用（UWP）中按名称查找
+        （精确优先、子串兜底），多候选或无命中即失败；唯一命中 .lnk 时解析
+        TargetPath 供展示与窗口等待，唯一命中 UWP 时记录 AppID 供
+        explorer.exe shell:AppsFolder 启动，不推导进程名。
         路径启动校验文件存在且为 .exe 或 .lnk，.lnk 同样解析目标。
     .PARAMETER Item
         已通过字段校验的 app 启动项模型
     .PARAMETER Shortcuts
         开始菜单快捷方式数组，由调用方扫描一次后复用
+    .PARAMETER UwpApps
+        商店应用数组（Get-AsUwpStartApps），由调用方读取一次后复用
     .OUTPUTS
-        PSCustomObject：Success / Reason / Mode / LaunchPath / TargetPath /
-        TargetKnown / ProcessName
+        PSCustomObject：Success / Reason / Mode / Kind / LaunchPath / TargetPath /
+        TargetKnown / ProcessName / UwpName / AppId
     #>
     param(
         [Parameter(Mandatory = $true)][object]$Item,
-        [object[]]$Shortcuts = @()
+        [object[]]$Shortcuts = @(),
+        [object[]]$UwpApps = @()
     )
 
     $result = [PSCustomObject]@{
         Success     = $false
         Reason      = ''
         Mode        = ''
+        Kind        = 'File'
         LaunchPath  = ''
         TargetPath  = ''
         TargetKnown = $false
         ProcessName = ''
+        UwpName     = ''
+        AppId       = ''
     }
 
     if ($Item.Data.ContainsKey('Name')) {
         $result.Mode = 'Name'
         $name = [string]$Item.Data.Name
-        $match = Find-AsShortcutByName -Name $name -Shortcuts $Shortcuts
+        $match = Find-AsNameCandidates -Name $name -Shortcuts $Shortcuts -UwpApps $UwpApps
         if ($match.MatchType -eq 'None') {
-            $result.Reason = "未在开始菜单中找到名称包含 '$name' 的快捷方式"
+            $result.Reason = "未在开始菜单快捷方式或商店应用中找到名称包含 '$name' 的条目"
             return $result
         }
         if ($match.Candidates.Count -gt 1) {
             $label = if ($match.MatchType -eq 'Exact') { '精确' } else { '模糊' }
-            $candidateText = Get-AsCandidateText -Values @($match.Candidates | ForEach-Object { $_.FullName })
-            $result.Reason = "名称 '$name' $($label)匹配到多个开始菜单快捷方式：$candidateText"
+            $candidateText = Get-AsCandidateText -Values @($match.Candidates | ForEach-Object { $_.Display })
+            $result.Reason = "名称 '$name' $($label)匹配到多个开始菜单快捷方式或商店应用：$candidateText"
             return $result
         }
 
-        $shortcut = $match.Candidates[0]
+        $candidate = $match.Candidates[0]
+        if ($candidate.Kind -eq 'Uwp') {
+            # UWP：记录 AppID，由执行阶段用 explorer.exe shell:AppsFolder 启动
+            $result.Kind = 'Uwp'
+            $result.UwpName = [string]$candidate.UwpName
+            $result.AppId = [string]$candidate.AppId
+            $result.Success = $true
+            return $result
+        }
+
+        $shortcut = $candidate.Shortcut
         $result.LaunchPath = $shortcut.FullName
         $info = Resolve-AsShortcutInfo -ShortcutPath $shortcut.FullName
         $result.TargetPath = $info.TargetPath
@@ -815,7 +902,9 @@ function Initialize-AsAppTargets {
     .SYNOPSIS
         在 DryRun 与执行之前统一解析所有有效 app 启动项
     .DESCRIPTION
-        只有存在名称启动项时才扫描一次开始菜单，所有 app 项共用该结果。
+        只有存在名称启动项时才扫描一次开始菜单快捷方式并读取一次商店应用清单，
+        所有 app 项共用这两份结果；Get-StartApps 失败时由 Get-AsUwpStartApps
+        警告，名称启动继续使用 .lnk。
         解析成功把结果写入 Data.Launch；失败则把启动项标记为 Failed 并给出原因，
         由现有引擎按失败项计数、跳过并继续后续项。
     .PARAMETER Items
@@ -829,13 +918,15 @@ function Initialize-AsAppTargets {
         }
     )
     $shortcuts = @()
+    $uwpApps = @()
     if ($nameItems.Count -gt 0) {
         $shortcuts = @(Get-AsStartMenuShortcuts)
+        $uwpApps = @(Get-AsUwpStartApps)
     }
 
     foreach ($item in $Items) {
         if ($item.Type -ne 'app' -or $item.Status -ne 'Valid') { continue }
-        $resolution = Resolve-AsAppTarget -Item $item -Shortcuts $shortcuts
+        $resolution = Resolve-AsAppTarget -Item $item -Shortcuts $shortcuts -UwpApps $uwpApps
         if ($resolution.Success) {
             $item.Data.Launch = $resolution
         } else {
@@ -1476,7 +1567,9 @@ function Get-AsItemDetail {
         'app' {
             if ($Item.Data.ContainsKey('Launch')) {
                 $launch = $Item.Data.Launch
-                if ($launch.Mode -eq 'Name') {
+                if ($launch.Kind -eq 'Uwp') {
+                    $text = "UWP：$($launch.UwpName)（$($launch.AppId)）→ shell:AppsFolder\$($launch.AppId)"
+                } elseif ($launch.Mode -eq 'Name') {
                     $text = "名称启动：$($Item.Data.Name) → $($launch.LaunchPath)"
                     if ($launch.TargetKnown) {
                         $text += "；目标：$($launch.TargetPath)"
@@ -1560,7 +1653,7 @@ function Get-AsIntervalMs {
     .DESCRIPTION
         任一端是校验有效的休眠项时为 0（休眠项替代默认间隔，不叠加）；
         校验失败的休眠项不执行等待，也不替代间隔，按普通项规则处理：
-        取前一项的 delayMs（若有），再退回全局默认间隔。
+        一律使用顶层默认间隔（启动项不支持 delayMs）。
     .PARAMETER Previous
         前一个启动项模型
     .PARAMETER Next
@@ -1577,7 +1670,6 @@ function Get-AsIntervalMs {
     $previousSleep = Test-AsSleepItem -Item $Previous
     $nextSleep = Test-AsSleepItem -Item $Next
     if ($previousSleep -or $nextSleep) { return 0 }
-    if ($null -ne $Previous.DelayMs) { return [int]$Previous.DelayMs }
     return $DefaultDelayMs
 }
 
@@ -1587,7 +1679,7 @@ function Get-AsIntervalDescription {
         生成 DryRun 用的间隔规则说明
     .DESCRIPTION
         与 Get-AsIntervalMs 使用同一判定：只有校验有效的休眠项才替代间隔；
-        校验失败的休眠项按普通项规则展示默认间隔或前一项 delayMs。
+        校验失败的休眠项按普通项规则展示顶层默认间隔。
     #>
     param(
         [object]$Previous,
@@ -1605,9 +1697,6 @@ function Get-AsIntervalDescription {
     }
     if ($nextSleep) {
         return '0 毫秒（下一项为休眠项，替代默认间隔）'
-    }
-    if ($null -ne $Previous.DelayMs) {
-        return "$($Previous.DelayMs) 毫秒（本项 delayMs 覆盖默认间隔）"
     }
     return "$DefaultDelayMs 毫秒（默认间隔）"
 }
@@ -1819,7 +1908,8 @@ function Invoke-AsItem {
         command 只在其标签组首项位置启动整组；同组后续项到位置时读取组结果：
         组成功则记为“已并入标签组”，组失败则同组所有项都记为失败。
         app 启动后轮询等待主窗口最多 10 秒（不抢焦点），超时仍记为成功，
-        由 Warning 字段提示调用方输出警告。
+        由 Warning 字段提示调用方输出警告；名称启动命中 UWP 时改用 explorer.exe
+        启动 shell:AppsFolder\<AppID>，不推导进程名、不等待主窗口。
         返回 PSCustomObject：Success / Message / Warning。
     .PARAMETER Item
         已校验且 app 项已完成目标解析、command 项已归属标签组的启动项模型
@@ -1892,6 +1982,26 @@ function Invoke-AsItem {
             $launch = $Item.Data.Launch
             if (-not $launch) {
                 return [PSCustomObject]@{ Success = $false; Message = '未解析出可启动目标'; Warning = '' }
+            }
+
+            # UWP 名称启动：与 op 一致，用 explorer.exe 打开 shell:AppsFolder；
+            # 不推导进程名，因而不等待主窗口、不参与置顶
+            if ($launch.Kind -eq 'Uwp') {
+                try {
+                    $explorer = Join-Path $env:SystemRoot 'explorer.exe'
+                    Start-Process -FilePath $explorer -ArgumentList ('shell:AppsFolder\{0}' -f $launch.AppId) -ErrorAction Stop
+                } catch {
+                    return [PSCustomObject]@{
+                        Success = $false
+                        Message = "启动 UWP 应用失败：$($_.Exception.Message)"
+                        Warning = ''
+                    }
+                }
+                return [PSCustomObject]@{
+                    Success = $true
+                    Message = "启动 UWP：$($launch.UwpName)（$($launch.AppId)）"
+                    Warning = ''
+                }
             }
 
             try {
