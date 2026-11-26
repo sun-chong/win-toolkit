@@ -63,7 +63,7 @@
 - 运行时状态写 `%LOCALAPPDATA%\toolkit\state\<tool>.json`，用 `Read-ToolkitState` / `Write-ToolkitState`。
 - 所有文本与 JSON 用 UTF-8 **无 BOM** 读写：
   `[System.IO.File]::WriteAllText($path, $json, [System.Text.UTF8Encoding]::new($false))`
-  例外：按天追加的日志文件（如 `sync-skills` 的 `logs/skills-<yyyyMMdd>.log`）写 UTF-8 **带 BOM**，否则记事本与 `type` 会按 ANSI 解析而显示乱码。
+  例外：所有工具共用、按天追加的共享日志 `logs/<yyyyMMdd>.log`（经公共库 `Write-ToolkitLogLine` 写入）写 UTF-8 **带 BOM**，否则记事本与 `type` 会按 ANSI 解析而显示乱码。
 - 禁止字面量 `C:\Users\<用户名>`；用户目录用 `Get-ToolkitPath` 解析。`win-init.ps1` 是例外：它建立环境，允许使用 `$env:USERPROFILE`。
 - `config/local.psd1` 已废弃，不再支持。
 
