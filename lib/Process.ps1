@@ -264,6 +264,99 @@ function Invoke-WithTimeout {
     return Invoke-ChildProcess -Command $Command -TimeoutSeconds $TimeoutSeconds
 }
 
+function Find-ToolkitWindowProcess {
+    <#
+    .SYNOPSIS
+        查找拥有主窗口的目标进程
+    .DESCRIPTION
+        按进程名查找拥有主窗口（MainWindowHandle 非零）的进程；指定
+        -TitleContains 时再要求主窗口标题包含该文本（大小写不敏感）。
+        多个实例同时有主窗口时取启动时间最新的一个。只读检测，不调用任何
+        置前或抢焦点 API。内部辅助函数，不导出。
+    .PARAMETER ProcessName
+        目标进程名（不含 .exe）
+    .PARAMETER TitleContains
+        主窗口标题必须包含的子串；省略时不按标题过滤
+    .OUTPUTS
+        System.Diagnostics.Process；没有匹配时返回 $null
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$ProcessName,
+        [string]$TitleContains
+    )
+
+    $requireTitle = -not [string]::IsNullOrWhiteSpace($TitleContains)
+    $candidate = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
+        Where-Object {
+            try {
+                $_.Refresh()
+                $hasWindow = $_.MainWindowHandle.ToInt64() -ne 0
+                $titleMatches = if ($requireTitle) {
+                    -not [string]::IsNullOrWhiteSpace($_.MainWindowTitle) -and
+                    $_.MainWindowTitle.IndexOf($TitleContains, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                } else {
+                    $true
+                }
+                $hasWindow -and $titleMatches
+            } catch {
+                $false
+            }
+        } |
+        Sort-Object -Property { try { $_.StartTime } catch { [datetime]::MinValue } } -Descending |
+        Select-Object -First 1
+
+    return $candidate
+}
+
+function Wait-ToolkitWindowHandle {
+    <#
+    .SYNOPSIS
+        轮询等待目标进程出现主窗口并返回窗口句柄
+    .DESCRIPTION
+        按进程名轮询查找拥有主窗口（MainWindowHandle 非零）的进程；指定
+        -TitleContains 时再要求主窗口标题包含该文本（大小写不敏感）。
+        多个实例同时有主窗口时取启动时间最新的一个。单实例应用会让新启动的
+        进程立刻退出、由已有实例展示窗口，因此这里按进程名查找，而不是只看
+        新进程。只读检测，不调用任何置前或抢焦点 API；超时返回零句柄。
+    .PARAMETER ProcessName
+        目标进程名（不含 .exe）
+    .PARAMETER TitleContains
+        可选的窗口标题子串；指定后只接受标题包含该文本的主窗口
+    .PARAMETER TimeoutMs
+        最长等待毫秒数，默认 10000；0 表示只检测一次
+    .PARAMETER IntervalMs
+        轮询间隔毫秒数，默认 100
+    .EXAMPLE
+        Wait-ToolkitWindowHandle -ProcessName 'notepad' -TimeoutMs 5000
+        等待记事本主窗口最多 5 秒，返回窗口句柄；超时返回零句柄
+    .EXAMPLE
+        Wait-ToolkitWindowHandle -ProcessName 'Code' -TitleContains 'ProjectX'
+        等待标题包含 ProjectX 的 VS Code 窗口
+    .OUTPUTS
+        System.IntPtr；找到时为主窗口句柄，超时为 [IntPtr]::Zero
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ProcessName,
+        [string]$TitleContains,
+        [int]$TimeoutMs = 10000,
+        [int]$IntervalMs = 100
+    )
+
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    while ($true) {
+        $candidate = Find-ToolkitWindowProcess -ProcessName $ProcessName -TitleContains $TitleContains
+        if ($candidate) {
+            return $candidate.MainWindowHandle
+        }
+        if ((Get-Date) -ge $deadline) { return [IntPtr]::Zero }
+        Start-Sleep -Milliseconds $IntervalMs
+    }
+}
+
 function Start-ToolkitGuiProcess {
     <#
     .SYNOPSIS
@@ -273,6 +366,7 @@ function Start-ToolkitGuiProcess {
         从终端启动的 GUI 程序默认没有前台权限（Windows 前台锁），窗口常被压在
         终端窗口之后；单实例应用还会让 Start-Process 返回的进程立刻退出、由已有
         实例展示窗口，因此这里按进程名查找窗口，而不是只看新进程。
+        等待主窗口由 Wait-ToolkitWindowHandle 完成，本函数只负责启动、置前与返回进程。
     .PARAMETER FilePath
         可执行文件路径
     .PARAMETER ArgumentList
@@ -312,24 +406,13 @@ function Start-ToolkitGuiProcess {
     $started = Start-Process @startParams
 
     $process = $null
-    $handle = [IntPtr]::Zero
-    $deadline = (Get-Date).AddSeconds([math]::Max(1, $TimeoutSeconds))
-    while ($true) {
-        $candidate = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
-            Where-Object { try { $_.Refresh(); $_.MainWindowHandle.ToInt64() -ne 0 } catch { $false } } |
-            Sort-Object -Property StartTime -Descending |
-            Select-Object -First 1
-        if ($candidate) {
-            $process = $candidate
-            $handle = $candidate.MainWindowHandle
-            break
-        }
-        if ((Get-Date) -ge $deadline) { break }
-        Start-Sleep -Milliseconds 100
-    }
+    # 与原先一致：TimeoutSeconds 为 0 时仍至少等待 1 秒
+    $timeoutMs = [math]::Max(1, $TimeoutSeconds) * 1000
+    $handle = Wait-ToolkitWindowHandle -ProcessName $ProcessName -TimeoutMs $timeoutMs -IntervalMs 100
 
     if ($handle.ToInt64() -ne 0) {
         $null = Set-ToolkitForegroundWindow -Handle $handle
+        $process = Find-ToolkitWindowProcess -ProcessName $ProcessName
     }
 
     if ($process) { return $process }
@@ -345,6 +428,9 @@ function Set-ToolkitForegroundWindow {
         以绕过 Windows 前台锁对 SetForegroundWindow 的限制，最后解除附加。
     .PARAMETER Handle
         窗口句柄
+    .EXAMPLE
+        $null = Set-ToolkitForegroundWindow -Handle $process.MainWindowHandle
+        把指定进程的主窗口切到前台
     .NOTES
         Author: SUNC
         Version: 1.0.0
