@@ -1866,10 +1866,19 @@ function Invoke-AsTopMostStage {
             continue
         }
 
-        $activated = [bool](Set-ToolkitForegroundWindow -Handle $handle)
+        $activated = $false
+        $activationError = ''
+        try {
+            $activated = [bool](Set-ToolkitForegroundWindow -Handle $handle)
+        } catch {
+            $activationError = $_.Exception.Message
+        }
         if ($activated) {
             $line = "$prefix $description：已切到前台"
             Write-ToolkitMessage -Kind Success -Text $line
+        } elseif ($activationError) {
+            $line = "$prefix $description 警告：激活窗口时出错：$activationError"
+            Write-ToolkitMessage -Kind Warning -Text $line
         } else {
             $line = "$prefix $description 警告：找到窗口但切到前台失败"
             Write-ToolkitMessage -Kind Warning -Text $line
