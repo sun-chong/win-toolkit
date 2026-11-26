@@ -7,11 +7,13 @@
     （兼容 .json），用 -c 可指定命名配置（如 as-shopee）或按路径指定配置，
     一次运行只使用一份启动配置。
 
-    本版本实现 app（名称启动/路径启动）、folder（用资源管理器打开目录）与
-    sleep（显式等待）三类启动项；url、command、vscode 完成解析与校验后标记为失败，
-    并提示该类型将在后续工单实现。名称启动先按快捷方式文件名精确匹配，无精确命中时
-    改用子串匹配；无命中或多候选时该项失败。单个启动项失败不会中断清单，结束时给出
-    成功/失败汇总并按结果设置退出码。
+    本版本实现 app（名称启动/路径启动）、url（默认浏览器多标签）、folder（用资源
+    管理器打开目录）与 sleep（显式等待）四类启动项；command、vscode 完成解析与校验
+    后标记为失败，并提示该类型将在后续工单实现。url 读取系统默认浏览器可执行文件，
+    把该项全部网址一次性作为参数交给浏览器，使多个网址在同一窗口以多标签打开；
+    解析不到默认浏览器时退化为逐个打开网址，不算失败。名称启动先按快捷方式文件名
+    精确匹配，无精确命中时改用子串匹配；无命中或多候选时该项失败。单个启动项失败
+    不会中断清单，结束时给出成功/失败汇总并按结果设置退出码。
 
 .PARAMETER Config
     启动配置的短名或路径
@@ -21,8 +23,8 @@
           -c .\as-shopee.config.jsonc、-c C:\configs\as-shopee.config.json
 
 .PARAMETER DryRun
-    只打印解析计划与每项间隔规则（app 显示命中的快捷方式与目标路径），
-    不启动任何程序、不写日志
+    只打印解析计划与每项间隔规则（app 显示命中的快捷方式与目标路径，
+    url 显示默认浏览器可执行文件与网址清单），不启动任何程序、不写日志
 
 .PARAMETER SkipTopMost
     跳过置顶阶段；置顶由后续工单实现，本版本无实际效果
@@ -49,7 +51,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.1.0
+    Version: 1.2.0
 #>
 
 param(
@@ -80,7 +82,7 @@ $helpSections = @(
         'as                              执行默认启动配置 as.config'
         'as -c as-shopee                 执行命名启动配置（短名/带 .config/完整文件名均可）'
         'as -c .\as-shopee.config.jsonc  按路径指定启动配置（相对路径相对 cli-tools 目录）'
-        'as -DryRun                      只打印解析计划（含 app 命中与目标），不启动程序、不写日志'
+        'as -DryRun                      只打印解析计划（含 app 命中与 url 浏览器），不启动程序、不写日志'
         'as -SkipTopMost                 跳过置顶阶段（置顶由后续工单实现）'
         'as -h                           显示帮助信息'
     ) }
@@ -92,11 +94,14 @@ $helpSections = @(
     ) }
     @{ Title = '启动项'; Lines = @(
         'app      name 或 path（二者互斥）              名称启动/路径启动（本版本已实现）'
-        'url      urls（字符串或字符串数组）            默认浏览器多标签（后续工单实现）'
+        'url      urls（字符串或字符串数组）            默认浏览器多标签（本版本已实现）'
         'folder   path                                  资源管理器打开目录（本版本已实现）'
         'command  command，可选 cwd/newTab/keepOpen     默认终端执行（后续工单实现）'
         'vscode   path 或 name（二者互斥）              VS Code 打开项目（后续工单实现）'
         'sleep    ms（正整数）                          显式等待（本版本已实现）'
+        'url 读取 HKCU 的 http UserChoice ProgId 与对应 shell\open\command，解析系统默认浏览器；'
+        '解析成功时把该项全部网址一次性交给浏览器，多个网址在同一窗口以多标签打开；'
+        '解析失败时退化为逐个打开网址（与 op 一致），DryRun 提示“将退化为逐个打开”，不算失败。'
         '公共可选字段：delayMs（覆盖本项之后的间隔）、topMost（仅 app/vscode，置顶由后续工单实现）。'
         '休眠项不接受 delayMs/topMost，出现时警告并忽略。'
         '名称启动扫描用户与机器开始菜单的 .lnk：快捷方式文件名精确匹配优先，否则子串匹配；'
@@ -775,6 +780,139 @@ function Initialize-AsAppTargets {
     }
 }
 
+# ============================================================
+# url 目标解析（默认浏览器）
+# ============================================================
+
+function Get-AsRegistryDefaultValue {
+    <#
+    .SYNOPSIS
+        读取注册表键的默认值
+    .DESCRIPTION
+        键不存在、无默认值或读取失败时返回空字符串，不抛异常。
+    .PARAMETER LiteralPath
+        注册表键路径，支持 HKCU:\ 与 Registry:: 前缀
+    .OUTPUTS
+        默认值字符串；取不到时为空字符串
+    #>
+    param([string]$LiteralPath)
+
+    if ([string]::IsNullOrWhiteSpace($LiteralPath)) { return '' }
+    try {
+        $property = Get-ItemProperty -LiteralPath $LiteralPath -ErrorAction Stop
+        return [string]$property.'(default)'
+    } catch {
+        return ''
+    }
+}
+
+function Get-AsDefaultBrowserProgId {
+    <#
+    .SYNOPSIS
+        读取系统默认浏览器（http 协议）的 ProgId
+    .DESCRIPTION
+        从 HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice
+        读取 ProgId。键缺失或值不是非空字符串时返回空字符串。
+    .OUTPUTS
+        ProgId 字符串（如 MSEdgeHTM）；取不到时为空字符串
+    #>
+    $userChoiceKey = 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice'
+    try {
+        $choice = Get-ItemProperty -LiteralPath $userChoiceKey -Name 'ProgId' -ErrorAction Stop
+        $progId = [string]$choice.ProgId
+    } catch {
+        return ''
+    }
+    if ([string]::IsNullOrWhiteSpace($progId)) { return '' }
+    return $progId.Trim()
+}
+
+function Convert-AsBrowserCommandToExecutable {
+    <#
+    .SYNOPSIS
+        从浏览器注册命令字符串解析可执行文件路径
+    .DESCRIPTION
+        以引号开头时取引号内的路径，否则截取到第一个 .exe；随后展开 %VAR%
+        环境变量并校验文件存在。任一步失败都返回空字符串，不抛异常。
+    .PARAMETER Command
+        shell\open\command 的默认值，如 "C:\...\msedge.exe" --single-argument %1
+    .OUTPUTS
+        可执行文件完整路径；解析失败时为空字符串
+    #>
+    param([string]$Command)
+
+    if ([string]::IsNullOrWhiteSpace($Command)) { return '' }
+
+    $value = $Command.Trim()
+    if ($value.StartsWith('"')) {
+        $end = $value.IndexOf('"', 1)
+        if ($end -lt 2) { return '' }
+        $value = $value.Substring(1, $end - 1)
+    } else {
+        $exeIndex = $value.IndexOf('.exe', [System.StringComparison]::OrdinalIgnoreCase)
+        if ($exeIndex -lt 0) { return '' }
+        $value = $value.Substring(0, $exeIndex + 4)
+    }
+
+    $expanded = [System.Environment]::ExpandEnvironmentVariables($value)
+    if ([string]::IsNullOrWhiteSpace($expanded)) { return '' }
+    if (-not (Test-Path -LiteralPath $expanded -PathType Leaf)) { return '' }
+    return $expanded
+}
+
+function Resolve-AsDefaultBrowser {
+    <#
+    .SYNOPSIS
+        解析系统默认浏览器的可执行文件路径
+    .DESCRIPTION
+        先读 http UserChoice 的 ProgId，再读 HKCU\Software\Classes\<ProgId>\shell\open\command；
+        HKCU 取不到时回退 HKCR。PowerShell 7 默认未挂载 HKCR: 驱动器，
+        回退使用等价的 Registry::HKEY_CLASSES_ROOT。
+        ProgId 缺失、命令缺失或可执行文件无法解析时返回空字符串。
+    .OUTPUTS
+        浏览器可执行文件完整路径；解析失败时为空字符串
+    #>
+    $progId = Get-AsDefaultBrowserProgId
+    if ([string]::IsNullOrWhiteSpace($progId)) { return '' }
+
+    $commandKeys = @(
+        "HKCU:\Software\Classes\$progId\shell\open\command"
+        "Registry::HKEY_CLASSES_ROOT\$progId\shell\open\command"
+    )
+    $command = ''
+    foreach ($key in $commandKeys) {
+        $command = Get-AsRegistryDefaultValue -LiteralPath $key
+        if (-not [string]::IsNullOrWhiteSpace($command)) { break }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($command)) { return '' }
+    return (Convert-AsBrowserCommandToExecutable -Command $command)
+}
+
+function Initialize-AsUrlTargets {
+    <#
+    .SYNOPSIS
+        在 DryRun 与执行之前解析默认浏览器并写入 url 启动项
+    .DESCRIPTION
+        只有存在有效 url 启动项时才读取一次注册表，所有 url 项共用结果。
+        解析不到浏览器时仍写入空字符串：执行阶段据此退化为逐个打开，
+        不把该项标记为失败（DryRun 会提示将退化）。
+    .PARAMETER Items
+        启动项模型数组（就地修改）
+    #>
+    param([object[]]$Items)
+
+    $urlItems = @(
+        $Items | Where-Object { $_.Type -eq 'url' -and $_.Status -eq 'Valid' }
+    )
+    if ($urlItems.Count -eq 0) { return }
+
+    $browser = Resolve-AsDefaultBrowser
+    foreach ($item in $urlItems) {
+        $item.Data.Browser = $browser
+    }
+}
+
 function Get-AsItemDetail {
     <#
     .SYNOPSIS
@@ -811,7 +949,13 @@ function Get-AsItemDetail {
             if ($Item.TopMost) { $text += '；置顶：是' }
             return $text
         }
-        'url' { return "网址：$($Item.Data.Urls -join '、')" }
+        'url' {
+            $urlText = @($Item.Data.Urls) -join '、'
+            if ($Item.Data.ContainsKey('Browser') -and -not [string]::IsNullOrWhiteSpace([string]$Item.Data.Browser)) {
+                return "默认浏览器：$($Item.Data.Browser)；网址：$urlText"
+            }
+            return "未解析到默认浏览器，将退化为逐个打开；网址：$urlText"
+        }
         'command' {
             $text = "命令：$($Item.Data.Command)"
             if ($Item.Data.ContainsKey('Cwd')) { $text += "；工作目录：$($Item.Data.Cwd)" }
@@ -926,7 +1070,9 @@ function Invoke-AsItem {
     .SYNOPSIS
         执行单个启动项
     .DESCRIPTION
-        本版本执行 app、folder 与 sleep；其余三类返回失败并提示后续工单实现。
+        本版本执行 app、url、folder 与 sleep；command、vscode 返回失败并提示后续工单实现。
+        url 解析到默认浏览器时把全部网址一次性交给浏览器（同一窗口多标签）；
+        解析不到时退化为逐个 Start-Process（与 op 一致），结果 Message 标注退化。
         app 启动后轮询等待主窗口最多 10 秒（不抢焦点），超时仍记为成功，
         由 Warning 字段提示调用方输出警告。
         返回 PSCustomObject：Success / Message / Warning。
@@ -939,6 +1085,50 @@ function Invoke-AsItem {
         'sleep' {
             Start-Sleep -Milliseconds ([int]$Item.Data.Ms)
             return [PSCustomObject]@{ Success = $true; Message = "等待 $($Item.Data.Ms) 毫秒"; Warning = '' }
+        }
+        'url' {
+            $urls = @($Item.Data.Urls)
+            $browser = if ($Item.Data.ContainsKey('Browser')) { [string]$Item.Data.Browser } else { '' }
+
+            if ([string]::IsNullOrWhiteSpace($browser)) {
+                # 解析不到默认浏览器：与 op 一致，逐个交给协议处理程序
+                $failures = @()
+                foreach ($url in $urls) {
+                    try {
+                        Start-Process $url -ErrorAction Stop
+                    } catch {
+                        $failures += "$url（$($_.Exception.Message)）"
+                    }
+                }
+                if ($failures.Count -gt 0) {
+                    return [PSCustomObject]@{
+                        Success = $false
+                        Message = "未解析到默认浏览器，已退化为逐个打开：成功 $($urls.Count - $failures.Count) 个，失败 $($failures.Count) 个：$($failures -join '、')"
+                        Warning = ''
+                    }
+                }
+                return [PSCustomObject]@{
+                    Success = $true
+                    Message = "未解析到默认浏览器，已退化为逐个打开 $($urls.Count) 个网址"
+                    Warning = ''
+                }
+            }
+
+            try {
+                # 全部网址一次性交给浏览器，由其归并到同一窗口的多个标签
+                Start-Process -FilePath $browser -ArgumentList $urls -ErrorAction Stop
+                return [PSCustomObject]@{
+                    Success = $true
+                    Message = "用默认浏览器打开 $($urls.Count) 个网址（同一窗口多标签）：$browser"
+                    Warning = ''
+                }
+            } catch {
+                return [PSCustomObject]@{
+                    Success = $false
+                    Message = "启动默认浏览器失败：$($_.Exception.Message)"
+                    Warning = ''
+                }
+            }
         }
         'folder' {
             $path = [string]$Item.Data.Path
@@ -995,8 +1185,9 @@ function Show-AsDryRun {
         打印启动清单的解析计划与间隔规则，不启动任何程序、不写日志
     .DESCRIPTION
         逐项打印序号、类型与解析结果；app 显示命中的快捷方式与目标路径
-        （或路径启动解析后的路径），folder 显示展开后的路径，sleep 显示毫秒数，
-        url/command/vscode 显示配置摘要并标注尚未实现。
+        （或路径启动解析后的路径），url 显示默认浏览器与网址清单（解析失败时
+        提示将退化为逐个打开，不算失败），folder 显示展开后的路径，
+        sleep 显示毫秒数，command/vscode 显示配置摘要并标注尚未实现。
         返回校验失败（含 app 解析失败与目录不存在）的项数，供调用方决定退出码。
     .PARAMETER Items
         启动项模型数组
@@ -1037,6 +1228,9 @@ function Show-AsDryRun {
         } elseif ($item.Type -eq 'app') {
             Write-ToolkitMessage -Kind Info -Text "$prefix app $(Get-AsItemDetail -Item $item)"
             $readyCount++
+        } elseif ($item.Type -eq 'url') {
+            Write-ToolkitMessage -Kind Info -Text "$prefix url $(Get-AsItemDetail -Item $item)"
+            $readyCount++
         } elseif ($item.Type -eq 'folder') {
             $exists = Test-Path -LiteralPath $item.Data.Path -PathType Container
             if ($exists) {
@@ -1064,7 +1258,7 @@ function Show-AsDryRun {
         }
     }
 
-    Write-ToolkitMessage -Kind Info -Text "DryRun 汇总：可执行 $readyCount 项（含解析成功的 app），待后续工单实现 $pendingCount 项，校验失败 $failedCount 项"
+    Write-ToolkitMessage -Kind Info -Text "DryRun 汇总：可执行 $readyCount 项（含已解析的 app 与 url），待后续工单实现 $pendingCount 项，校验失败 $failedCount 项"
     Write-ToolkitMessage -Kind Muted -Text '未启动任何程序，未写日志。'
     return $failedCount
 }
@@ -1115,6 +1309,9 @@ $items = @(
 
 # app 项在 DryRun 与执行前统一解析为可启动目标，DryRun 与执行共用同一结果
 $null = Initialize-AsAppTargets -Items $items
+
+# url 项在 DryRun 与执行前统一解析默认浏览器；解析失败只影响执行方式（退化）
+$null = Initialize-AsUrlTargets -Items $items
 
 if ($DryRun) {
     $failedCount = Show-AsDryRun -Items $items -DefaultDelayMs $globalDelayMs -ConfigPath $configInfo.Path -SkipTopMostStage ([bool]$SkipTopMost)
