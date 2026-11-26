@@ -345,6 +345,9 @@ function Set-ToolkitForegroundWindow {
         以绕过 Windows 前台锁对 SetForegroundWindow 的限制，最后解除附加。
     .PARAMETER Handle
         窗口句柄
+    .EXAMPLE
+        $null = Set-ToolkitForegroundWindow -Handle $process.MainWindowHandle
+        把指定进程的主窗口切到前台
     .NOTES
         Author: SUNC
         Version: 1.0.0
