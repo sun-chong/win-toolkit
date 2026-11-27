@@ -78,7 +78,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.6.0
+    Version: 1.6.1
 #>
 
 param(
@@ -274,20 +274,13 @@ function Test-AsIntegerValue {
     $Result.Value = 0
     if ($null -eq $Value -or $Value -is [bool] -or $Value -is [string]) { return $false }
 
-    if ($Value -is [int] -or $Value -is [long] -or $Value -is [int16] -or $Value -is [sbyte] -or $Value -is [byte] -or $Value -is [uint32] -or $Value -is [uint64]) {
-        if ($Value -lt $Minimum -or $Value -gt $Maximum) { return $false }
-        $Result.Value = [int]$Value
-        return $true
-    }
+    # 统一转成 double 后判断范围与整数性：整数与整值浮点走同一路径
+    try { $number = [double]$Value } catch { return $false }
+    if ($number -lt $Minimum -or $number -gt $Maximum) { return $false }
+    if ($number -ne [math]::Floor($number)) { return $false }
 
-    if ($Value -is [double] -or $Value -is [decimal] -or $Value -is [single]) {
-        if ($Value -lt $Minimum -or $Value -gt $Maximum) { return $false }
-        if ($Value -ne [math]::Floor($Value)) { return $false }
-        $Result.Value = [int]$Value
-        return $true
-    }
-
-    return $false
+    $Result.Value = [int]$number
+    return $true
 }
 
 function Show-AsAvailableConfigs {
@@ -321,6 +314,62 @@ function Show-AsAvailableConfigs {
 # ============================================================
 # 启动项校验
 # ============================================================
+
+function Get-AsNameOrPathSelection {
+    <#
+    .SYNOPSIS
+        校验并解析 app/vscode 启动项的 name 或 path 二选一
+    .DESCRIPTION
+        两类启动项共用同一规则：name 与 path 互斥且必须提供一个；
+        name 必须是非空字符串；path 展开环境变量并按配置目录解析相对路径。
+    .PARAMETER Raw
+        配置中的原始启动项
+    .PARAMETER BaseDir
+        相对路径的基准目录（启动配置所在目录）
+    .OUTPUTS
+        PSCustomObject：Name / Path / Reasons
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
+    #>
+    param(
+        [hashtable]$Raw,
+        [string]$BaseDir
+    )
+
+    $result = [PSCustomObject]@{
+        Name    = ''
+        Path    = ''
+        Reasons = @()
+    }
+
+    $hasName = $Raw.ContainsKey('name')
+    $hasPath = $Raw.ContainsKey('path')
+    if ($hasName -and $hasPath) {
+        $result.Reasons = @('name 与 path 只能二选一')
+        return $result
+    }
+    if (-not $hasName -and -not $hasPath) {
+        $result.Reasons = @('缺少 name 或 path')
+        return $result
+    }
+
+    if ($hasName) {
+        if ($Raw['name'] -is [string] -and -not [string]::IsNullOrWhiteSpace($Raw['name'])) {
+            $result.Name = $Raw['name'].Trim()
+        } else {
+            $result.Reasons = @('name 必须是非空字符串')
+        }
+        return $result
+    }
+
+    if ($Raw['path'] -is [string] -and -not [string]::IsNullOrWhiteSpace($Raw['path'])) {
+        $result.Path = [string](Resolve-ToolkitPathValue -Path $Raw['path'].Trim() -Base $BaseDir)
+    } else {
+        $result.Reasons = @('path 必须是非空字符串')
+    }
+    return $result
+}
 
 function Get-AsItemModel {
     <#
@@ -411,28 +460,14 @@ function Get-AsItemModel {
         }
     }
 
+    if ($type -in @('app', 'vscode')) {
+        $selection = Get-AsNameOrPathSelection -Raw $Raw -BaseDir $BaseDir
+        if ($selection.Name) { $model.Data.Name = $selection.Name }
+        if ($selection.Path) { $model.Data.Path = $selection.Path }
+        $reasons += $selection.Reasons
+    }
+
     switch ($type) {
-        'app' {
-            $hasName = $Raw.ContainsKey('name')
-            $hasPath = $Raw.ContainsKey('path')
-            if ($hasName -and $hasPath) {
-                $reasons += 'name 与 path 只能二选一'
-            } elseif (-not $hasName -and -not $hasPath) {
-                $reasons += '缺少 name 或 path'
-            } elseif ($hasName) {
-                if ($Raw['name'] -is [string] -and -not [string]::IsNullOrWhiteSpace($Raw['name'])) {
-                    $model.Data.Name = $Raw['name'].Trim()
-                } else {
-                    $reasons += 'name 必须是非空字符串'
-                }
-            } else {
-                if ($Raw['path'] -is [string] -and -not [string]::IsNullOrWhiteSpace($Raw['path'])) {
-                    $model.Data.Path = [string](Resolve-ToolkitPathValue -Path $Raw['path'].Trim() -Base $BaseDir)
-                } else {
-                    $reasons += 'path 必须是非空字符串'
-                }
-            }
-        }
         'url' {
             if (-not $Raw.ContainsKey('urls')) {
                 $reasons += '缺少 urls 字段'
@@ -512,27 +547,6 @@ function Get-AsItemModel {
                 }
             }
         }
-        'vscode' {
-            $hasName = $Raw.ContainsKey('name')
-            $hasPath = $Raw.ContainsKey('path')
-            if ($hasName -and $hasPath) {
-                $reasons += 'name 与 path 只能二选一'
-            } elseif (-not $hasName -and -not $hasPath) {
-                $reasons += '缺少 name 或 path'
-            } elseif ($hasName) {
-                if ($Raw['name'] -is [string] -and -not [string]::IsNullOrWhiteSpace($Raw['name'])) {
-                    $model.Data.Name = $Raw['name'].Trim()
-                } else {
-                    $reasons += 'name 必须是非空字符串'
-                }
-            } else {
-                if ($Raw['path'] -is [string] -and -not [string]::IsNullOrWhiteSpace($Raw['path'])) {
-                    $model.Data.Path = [string](Resolve-ToolkitPathValue -Path $Raw['path'].Trim() -Base $BaseDir)
-                } else {
-                    $reasons += 'path 必须是非空字符串'
-                }
-            }
-        }
         'sleep' {
             $ms = 0
             if (-not $Raw.ContainsKey('ms')) {
@@ -580,8 +594,7 @@ function Get-AsStartMenuShortcuts {
     foreach ($root in $roots) {
         if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
         $shortcuts += @(
-            Get-ChildItem -LiteralPath $root -File -Recurse -ErrorAction SilentlyContinue |
-                Where-Object { $_.Extension -eq '.lnk' }
+            Get-ChildItem -LiteralPath $root -Filter '*.lnk' -File -Recurse -ErrorAction SilentlyContinue
         )
     }
     return $shortcuts
@@ -626,35 +639,60 @@ function Get-AsUwpStartApps {
     return $apps
 }
 
+function Get-AsExecutableFromCommandText {
+    <#
+    .SYNOPSIS
+        从命令行文本中提取可执行文件路径
+    .DESCRIPTION
+        快捷方式目标与浏览器注册命令共用：以引号开头时取引号内的路径，
+        否则截取到第一个 .exe 结尾；随后展开 %VAR% 环境变量。
+        结果只保证是命令中的路径（通常是 .exe），不校验扩展名与文件是否存在，
+        由调用方按需检查（进程名推导要求 .exe，浏览器解析只要求文件存在）。
+    .PARAMETER Command
+        命令行文本，如 "C:\...\msedge.exe" --single-argument %1
+    .OUTPUTS
+        命令中的路径；无法解析时为空字符串
+    .EXAMPLE
+        Get-AsExecutableFromCommandText -Command '"C:\Windows\System32\notepad.exe" "%1"'
+        返回 C:\Windows\System32\notepad.exe
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
+    #>
+    param([string]$Command)
+
+    if ([string]::IsNullOrWhiteSpace($Command)) { return '' }
+
+    $value = $Command.Trim()
+    if ($value.StartsWith('"')) {
+        $end = $value.IndexOf('"', 1)
+        if ($end -lt 2) { return '' }
+        $value = $value.Substring(1, $end - 1)
+    } else {
+        $exeIndex = $value.IndexOf('.exe', [System.StringComparison]::OrdinalIgnoreCase)
+        if ($exeIndex -lt 0) { return '' }
+        $value = $value.Substring(0, $exeIndex + 4)
+    }
+
+    $expanded = [System.Environment]::ExpandEnvironmentVariables($value)
+    if ([string]::IsNullOrWhiteSpace($expanded)) { return '' }
+    return $expanded
+}
+
 function Get-AsProcessNameFromTarget {
     <#
     .SYNOPSIS
         从快捷方式目标路径推导进程名
     .DESCRIPTION
-        TargetPath 通常是纯路径，偶尔带引号或追加参数；这里先截取到 .exe 结尾，
-        仅当结果确为可执行文件时返回文件名（无扩展名），否则返回空字符串。
+        用 Get-AsExecutableFromCommandText 提取 .exe 路径后返回文件名（无扩展名）。
     .PARAMETER TargetPath
         快捷方式的目标路径
     #>
     param([string]$TargetPath)
 
-    if ([string]::IsNullOrWhiteSpace($TargetPath)) { return '' }
-
-    $value = $TargetPath.Trim()
-    if ($value.StartsWith('"')) {
-        $end = $value.IndexOf('"', 1)
-        if ($end -gt 1) {
-            $value = $value.Substring(1, $end - 1)
-        }
-    } else {
-        $exeIndex = $value.IndexOf('.exe', [System.StringComparison]::OrdinalIgnoreCase)
-        if ($exeIndex -ge 0) {
-            $value = $value.Substring(0, $exeIndex + 4)
-        }
-    }
-
-    if ([System.IO.Path]::GetExtension($value) -ine '.exe') { return '' }
-    return [System.IO.Path]::GetFileNameWithoutExtension($value)
+    $executable = Get-AsExecutableFromCommandText -Command $TargetPath
+    if (-not $executable -or [System.IO.Path]::GetExtension($executable) -ine '.exe') { return '' }
+    return [System.IO.Path]::GetFileNameWithoutExtension($executable)
 }
 
 function Resolve-AsShortcutInfo {
@@ -701,57 +739,79 @@ function Resolve-AsShortcutInfo {
     return $info
 }
 
-function Find-AsNameCandidates {
+function Get-AsNameCandidateIndex {
     <#
     .SYNOPSIS
-        按名称在开始菜单快捷方式与商店应用中查找候选
+        合并开始菜单快捷方式与商店应用为名称候选列表
     .DESCRIPTION
-        候选同时来自 .lnk 快捷方式（按去掉 .lnk 的文件名匹配）与 UWP 商店应用
-        （按 Get-StartApps 的显示名称匹配）；大小写不敏感，精确命中优先，
-        只有无精确命中时才做子串匹配。候选携带 Kind（Shortcut/Uwp）与失败原因
-        展示文本：.lnk 为完整路径，UWP 为名称与 AppID。
-    .PARAMETER Name
-        启动配置中的 name
+        候选携带 Kind（Shortcut/Uwp）、Name、Display 与启动所需字段。
+        调用方只构建一次，多个名称启动项共用。
     .PARAMETER Shortcuts
         Get-AsStartMenuShortcuts 返回的快捷方式数组
     .PARAMETER UwpApps
         Get-AsUwpStartApps 返回的商店应用数组
     .OUTPUTS
+        PSCustomObject 数组：Kind / Name / Display / Shortcut / UwpName / AppId
+    .EXAMPLE
+        $candidates = @(Get-AsNameCandidateIndex -Shortcuts $shortcuts -UwpApps $uwpApps)
+        构建一次供所有名称启动项复用
+    .NOTES
+        Author: SUNC
+        Version: 1.0.0
+    #>
+    param(
+        [object[]]$Shortcuts = @(),
+        [object[]]$UwpApps = @()
+    )
+
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    foreach ($shortcut in $Shortcuts) {
+        $candidates.Add([PSCustomObject]@{
+                Kind     = 'Shortcut'
+                Name     = [System.IO.Path]::GetFileNameWithoutExtension($shortcut.Name)
+                Display  = [string]$shortcut.FullName
+                Shortcut = $shortcut
+                UwpName  = ''
+                AppId    = ''
+            })
+    }
+    foreach ($uwp in $UwpApps) {
+        $candidates.Add([PSCustomObject]@{
+                Kind     = 'Uwp'
+                Name     = [string]$uwp.Name
+                Display  = "$($uwp.Name)（$($uwp.AppId)）"
+                Shortcut = $null
+                UwpName  = [string]$uwp.Name
+                AppId    = [string]$uwp.AppId
+            })
+    }
+    return $candidates.ToArray()
+}
+
+function Find-AsNameCandidates {
+    <#
+    .SYNOPSIS
+        在预构建的名称候选中查找匹配项
+    .DESCRIPTION
+        大小写不敏感，精确命中优先，只有无精确命中时才做子串匹配。
+        候选由 Get-AsNameCandidateIndex 构建一次后复用。
+    .PARAMETER Name
+        启动配置中的 name
+    .PARAMETER Candidates
+        Get-AsNameCandidateIndex 返回的候选数组
+    .OUTPUTS
         PSCustomObject：MatchType（Exact/Fuzzy/None）/ Candidates
     .EXAMPLE
-        Find-AsNameCandidates -Name 'Claude' -Shortcuts $shortcuts -UwpApps $uwpApps
-        返回名称匹配的快捷方式与商店应用候选
+        Find-AsNameCandidates -Name 'Claude' -Candidates $candidates
+        返回名称匹配的候选
     .NOTES
         Author: SUNC
         Version: 1.0.0
     #>
     param(
         [string]$Name,
-        [object[]]$Shortcuts = @(),
-        [object[]]$UwpApps = @()
+        [object[]]$Candidates = @()
     )
-
-    $candidates = @()
-    foreach ($shortcut in $Shortcuts) {
-        $candidates += [PSCustomObject]@{
-            Kind     = 'Shortcut'
-            Name     = [System.IO.Path]::GetFileNameWithoutExtension($shortcut.Name)
-            Display  = [string]$shortcut.FullName
-            Shortcut = $shortcut
-            UwpName  = ''
-            AppId    = ''
-        }
-    }
-    foreach ($uwp in $UwpApps) {
-        $candidates += [PSCustomObject]@{
-            Kind     = 'Uwp'
-            Name     = [string]$uwp.Name
-            Display  = "$($uwp.Name)（$($uwp.AppId)）"
-            Shortcut = $null
-            UwpName  = [string]$uwp.Name
-            AppId    = [string]$uwp.AppId
-        }
-    }
 
     $trimmed = $Name.Trim()
     $exact = @(
@@ -808,18 +868,15 @@ function Resolve-AsAppTarget {
         路径启动校验文件存在且为 .exe 或 .lnk，.lnk 同样解析目标。
     .PARAMETER Item
         已通过字段校验的 app 启动项模型
-    .PARAMETER Shortcuts
-        开始菜单快捷方式数组，由调用方扫描一次后复用
-    .PARAMETER UwpApps
-        商店应用数组（Get-AsUwpStartApps），由调用方读取一次后复用
+    .PARAMETER Candidates
+        名称候选数组（Get-AsNameCandidateIndex），由调用方构建一次后复用
     .OUTPUTS
         PSCustomObject：Success / Reason / Mode / Kind / LaunchPath / TargetPath /
         TargetKnown / ProcessName / UwpName / AppId
     #>
     param(
         [Parameter(Mandatory = $true)][object]$Item,
-        [object[]]$Shortcuts = @(),
-        [object[]]$UwpApps = @()
+        [object[]]$Candidates = @()
     )
 
     $result = [PSCustomObject]@{
@@ -838,7 +895,7 @@ function Resolve-AsAppTarget {
     if ($Item.Data.ContainsKey('Name')) {
         $result.Mode = 'Name'
         $name = [string]$Item.Data.Name
-        $match = Find-AsNameCandidates -Name $name -Shortcuts $Shortcuts -UwpApps $UwpApps
+        $match = Find-AsNameCandidates -Name $name -Candidates $Candidates
         if ($match.MatchType -eq 'None') {
             $result.Reason = "未在开始菜单快捷方式或商店应用中找到名称包含 '$name' 的条目"
             return $result
@@ -903,8 +960,8 @@ function Initialize-AsAppTargets {
         在 DryRun 与执行之前统一解析所有有效 app 启动项
     .DESCRIPTION
         只有存在名称启动项时才扫描一次开始菜单快捷方式并读取一次商店应用清单，
-        所有 app 项共用这两份结果；Get-StartApps 失败时由 Get-AsUwpStartApps
-        警告，名称启动继续使用 .lnk。
+        合并为候选索引后供所有 app 项复用；Get-StartApps 失败时由
+        Get-AsUwpStartApps 警告，名称启动继续使用 .lnk。
         解析成功把结果写入 Data.Launch；失败则把启动项标记为 Failed 并给出原因，
         由现有引擎按失败项计数、跳过并继续后续项。
     .PARAMETER Items
@@ -917,16 +974,16 @@ function Initialize-AsAppTargets {
             $_.Type -eq 'app' -and $_.Status -eq 'Valid' -and $_.Data.ContainsKey('Name')
         }
     )
-    $shortcuts = @()
-    $uwpApps = @()
+    $candidates = @()
     if ($nameItems.Count -gt 0) {
         $shortcuts = @(Get-AsStartMenuShortcuts)
         $uwpApps = @(Get-AsUwpStartApps)
+        $candidates = @(Get-AsNameCandidateIndex -Shortcuts $shortcuts -UwpApps $uwpApps)
     }
 
     foreach ($item in $Items) {
         if ($item.Type -ne 'app' -or $item.Status -ne 'Valid') { continue }
-        $resolution = Resolve-AsAppTarget -Item $item -Shortcuts $shortcuts -UwpApps $uwpApps
+        $resolution = Resolve-AsAppTarget -Item $item -Candidates $candidates
         if ($resolution.Success) {
             $item.Data.Launch = $resolution
         } else {
@@ -1115,8 +1172,8 @@ function Convert-AsBrowserCommandToExecutable {
     .SYNOPSIS
         从浏览器注册命令字符串解析可执行文件路径
     .DESCRIPTION
-        以引号开头时取引号内的路径，否则截取到第一个 .exe；随后展开 %VAR%
-        环境变量并校验文件存在。任一步失败都返回空字符串，不抛异常。
+        用 Get-AsExecutableFromCommandText 提取 .exe 路径，并校验文件存在。
+        任一步失败都返回空字符串，不抛异常。
     .PARAMETER Command
         shell\open\command 的默认值，如 "C:\...\msedge.exe" --single-argument %1
     .OUTPUTS
@@ -1124,23 +1181,9 @@ function Convert-AsBrowserCommandToExecutable {
     #>
     param([string]$Command)
 
-    if ([string]::IsNullOrWhiteSpace($Command)) { return '' }
-
-    $value = $Command.Trim()
-    if ($value.StartsWith('"')) {
-        $end = $value.IndexOf('"', 1)
-        if ($end -lt 2) { return '' }
-        $value = $value.Substring(1, $end - 1)
-    } else {
-        $exeIndex = $value.IndexOf('.exe', [System.StringComparison]::OrdinalIgnoreCase)
-        if ($exeIndex -lt 0) { return '' }
-        $value = $value.Substring(0, $exeIndex + 4)
-    }
-
-    $expanded = [System.Environment]::ExpandEnvironmentVariables($value)
-    if ([string]::IsNullOrWhiteSpace($expanded)) { return '' }
-    if (-not (Test-Path -LiteralPath $expanded -PathType Leaf)) { return '' }
-    return $expanded
+    $executable = Get-AsExecutableFromCommandText -Command $Command
+    if (-not $executable -or -not (Test-Path -LiteralPath $executable -PathType Leaf)) { return '' }
+    return $executable
 }
 
 function Resolve-AsDefaultBrowser {
@@ -1233,11 +1276,10 @@ function Get-AsDefaultTerminalInfo {
         conhost、未设置与未知第三方终端都按不支持标签（conhost 语义）处理。
         同一次运行只调用一次，DryRun 与执行共用结果。
     .OUTPUTS
-        PSCustomObject：SupportsTabs / Kind / DisplayName / Detail / WtPath
+        PSCustomObject：SupportsTabs / Detail / WtPath
     #>
     $wtConsoleClsid = '2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69'
     $wtTerminalClsid = 'E12CFF52-A866-4C77-9A90-F570A7AA2C6B'
-    $conhostClsid = 'B23D10C0-E52E-411E-9D5B-C09FDF709C7D'
     $nullClsid = '00000000-0000-0000-0000-000000000000'
 
     $readError = ''
@@ -1258,33 +1300,27 @@ function Get-AsDefaultTerminalInfo {
 
     $wtRegistered = ($consoleSet -and $consoleClsid -eq $wtConsoleClsid) -or
         ($terminalSet -and $terminalClsid -eq $wtTerminalClsid)
-    $conhostRegistered = ($consoleSet -and $consoleClsid -eq $conhostClsid) -or
-        ($terminalSet -and $terminalClsid -eq $conhostClsid)
 
-    $wtCommand = Get-Command -Name 'wt' -CommandType Application -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    $wtPath = if ($wtCommand -and $wtCommand.Source) { [string]$wtCommand.Source } else { '' }
-    $wtAvailable = -not [string]::IsNullOrWhiteSpace($wtPath)
+    # 只有登记为 Windows Terminal 时才需要探测 wt.exe，conhost 下不做无谓的 PATH 扫描
+    $wtPath = ''
+    $wtAvailable = $false
+    if ($wtRegistered) {
+        $wtCommand = Get-Command -Name 'wt' -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        $wtPath = if ($wtCommand -and $wtCommand.Source) { [string]$wtCommand.Source } else { '' }
+        $wtAvailable = -not [string]::IsNullOrWhiteSpace($wtPath)
+    }
 
     $supportsTabs = $wtRegistered -and $wtAvailable
 
     $consoleText = if (-not $consoleSet) { '未设置' } else { $consoleClsid }
     $terminalText = if (-not $terminalSet) { '未设置' } else { $terminalClsid }
-    $wtText = if ($wtAvailable) { '可用' } else { '不可用' }
-    $detail = "DelegationConsole=$consoleText；DelegationTerminal=$terminalText；wt.exe $wtText"
-
-    if ($supportsTabs) {
-        $kind = 'WindowsTerminal'
-        $displayName = 'Windows Terminal'
-    } else {
-        $displayName = '无标签终端'
-        if ($wtRegistered) {
-            $kind = 'WindowsTerminalUnavailable'
+    $detail = "DelegationConsole=$consoleText；DelegationTerminal=$terminalText"
+    if ($wtRegistered) {
+        $wtText = if ($wtAvailable) { '可用' } else { '不可用' }
+        $detail += "；wt.exe $wtText"
+        if (-not $wtAvailable) {
             $detail += '；已登记 Windows Terminal 但 wt.exe 不可用，按无标签终端处理'
-        } elseif ($conhostRegistered -or (-not $consoleSet -and -not $terminalSet -and -not $readError)) {
-            $kind = 'Conhost'
-        } else {
-            $kind = 'Unknown'
         }
     }
     if ($readError) {
@@ -1293,8 +1329,6 @@ function Get-AsDefaultTerminalInfo {
 
     return [PSCustomObject]@{
         SupportsTabs = $supportsTabs
-        Kind         = $kind
-        DisplayName  = $displayName
         Detail       = $detail
         WtPath       = $wtPath
     }
@@ -1565,8 +1599,10 @@ function Get-AsItemDetail {
         'folder' { return "打开目录：$($Item.Data.Path)" }
         'sleep' { return "等待 $($Item.Data.Ms) 毫秒" }
         'app' {
+            $isUwp = $false
             if ($Item.Data.ContainsKey('Launch')) {
                 $launch = $Item.Data.Launch
+                $isUwp = $launch.Kind -eq 'Uwp'
                 if ($launch.Kind -eq 'Uwp') {
                     $text = "UWP：$($launch.UwpName)（$($launch.AppId)）→ shell:AppsFolder\$($launch.AppId)"
                 } elseif ($launch.Mode -eq 'Name') {
@@ -1587,7 +1623,10 @@ function Get-AsItemDetail {
             } else {
                 $text = if ($Item.Data.ContainsKey('Name')) { "名称：$($Item.Data.Name)" } else { "路径：$($Item.Data.Path)" }
             }
-            if ($Item.TopMost) { $text += '；置顶：是' }
+            if ($Item.TopMost) {
+                if ($isUwp) { $text += '；置顶：是（UWP 不支持，执行时跳过）' }
+                else { $text += '；置顶：是' }
+            }
             return $text
         }
         'url' {
@@ -1738,13 +1777,12 @@ function Resolve-AsTopMostTarget {
     .PARAMETER Item
         标记 topMost 的 app 或 vscode 启动项模型
     .OUTPUTS
-        PSCustomObject：Success / Type / ProcessName / LeafName / Reason
+        PSCustomObject：Success / ProcessName / LeafName / Reason
     #>
     param([Parameter(Mandatory = $true)][object]$Item)
 
     $result = [PSCustomObject]@{
         Success     = $false
-        Type        = [string]$Item.Type
         ProcessName = ''
         LeafName    = ''
         Reason      = ''
@@ -1791,17 +1829,22 @@ function Get-AsTopMostItemDescription {
         vscode 显示用于匹配窗口标题的项目目录叶子名；无法识别时说明原因。
     .PARAMETER Item
         标记 topMost 的 app 或 vscode 启动项模型
+    .PARAMETER Target
+        Resolve-AsTopMostTarget 的结果；省略时自行解析一次
     #>
-    param([Parameter(Mandatory = $true)][object]$Item)
+    param(
+        [Parameter(Mandatory = $true)][object]$Item,
+        [object]$Target
+    )
 
-    $target = Resolve-AsTopMostTarget -Item $Item
-    if (-not $target.Success) {
-        return "$($Item.Type)（$($target.Reason)，执行时将跳过）"
+    if (-not $Target) { $Target = Resolve-AsTopMostTarget -Item $Item }
+    if (-not $Target.Success) {
+        return "$($Item.Type)（$($Target.Reason)，执行时将跳过）"
     }
     if ($Item.Type -eq 'app') {
-        return "app（进程：$($target.ProcessName)）"
+        return "app（进程：$($Target.ProcessName)）"
     }
-    return "vscode（窗口标题包含：$($target.LeafName)）"
+    return "vscode（窗口标题包含：$($Target.LeafName)）"
 }
 
 function Invoke-AsTopMostStage {
@@ -1833,13 +1876,14 @@ function Invoke-AsTopMostStage {
         return
     }
 
-    $startLine = "置顶阶段：按配置顺序激活 $($topMostItems.Count) 个窗口"
+    $startLine = "置顶阶段：按配置顺序处理 $($topMostItems.Count) 个置顶项"
     Write-ToolkitMessage -Kind Info -Text $startLine
     Write-ToolkitLogLine -Tool 'as' -Text $startLine
 
     foreach ($item in $topMostItems) {
         $prefix = "置顶 [启动项 $($item.Index)]"
-        $description = Get-AsTopMostItemDescription -Item $item
+        $target = Resolve-AsTopMostTarget -Item $item
+        $description = Get-AsTopMostItemDescription -Item $item -Target $target
 
         # 执行阶段未成功的项没有可激活的窗口；跳过且不改动其失败状态
         $executionResult = if ($Results.ContainsKey($item.Index)) { $Results[$item.Index] } else { $null }
@@ -1850,7 +1894,6 @@ function Invoke-AsTopMostStage {
             continue
         }
 
-        $target = Resolve-AsTopMostTarget -Item $item
         if (-not $target.Success) {
             $line = "$prefix $description 警告：$($target.Reason)，跳过置顶"
             Write-ToolkitMessage -Kind Warning -Text $line
@@ -2060,7 +2103,7 @@ function Invoke-AsItem {
 
             $launch = $Item.Data.Launch
             $target = [string]$launch.TargetPath
-            if (-not (Test-ExternalCommand -Name 'code')) {
+            if (-not $script:AsCodeAvailable) {
                 return [PSCustomObject]@{
                     Success = $false
                     Message = "未找到 code 命令（VS Code CLI），无法打开：$target"
@@ -2218,7 +2261,7 @@ function Show-AsDryRun {
         if ($topMostItems.Count -eq 0) {
             Write-ToolkitMessage -Kind Muted -Text '置顶计划：没有标记 topMost 的有效 app/vscode 启动项'
         } else {
-            Write-ToolkitMessage -Kind Info -Text "置顶计划：按配置顺序激活 $($topMostItems.Count) 个窗口（最后一个位于最上；仅切到前台一次，不改变永久层级）"
+            Write-ToolkitMessage -Kind Info -Text "置顶计划：按配置顺序处理 $($topMostItems.Count) 个置顶项（无法识别窗口的将在执行时跳过；最后一个激活的位于最上；仅切到前台一次，不改变永久层级）"
             $order = 1
             foreach ($topMostItem in $topMostItems) {
                 $description = Get-AsTopMostItemDescription -Item $topMostItem
@@ -2310,6 +2353,7 @@ if ($SkipTopMost) {
 # command 组启动时读取脚本级缓存：默认终端判定结果与 pwsh 可执行文件路径
 $script:AsTerminalInfo = $terminalInfo
 $script:AsPwshExecutable = Get-AsPwshExecutable
+$script:AsCodeAvailable = Test-ExternalCommand -Name 'code'
 
 $successCount = 0
 $failureCount = 0
