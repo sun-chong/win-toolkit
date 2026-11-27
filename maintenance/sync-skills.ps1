@@ -18,7 +18,7 @@
 
     配置文件使用 JSONC 格式，依赖 PowerShell 7 的 ConvertFrom-Json 原生支持注释与尾随逗号；
     同时兼容 .json，默认优先读取同目录的 .jsonc。
-    日志按天记录到 logs/skills-<yyyyMMdd>.log，只保留最近 10 个。
+    日志按天记录到仓库共享的 logs/<yyyyMMdd>.log：所有工具共用同一份按天文件，只保留最近 10 份。
 
 .PARAMETER Scope
     分发范围。local 只处理本地路径源，online 只处理远程源，all 处理全部。
@@ -47,7 +47,7 @@
 
 .NOTES
     Author: SUNC
-    Version: 1.7.1
+    Version: 1.8.1
 #>
 
 param(
@@ -84,15 +84,13 @@ $script:AgentSkillsDir = @{
     "pi"          = ".agents/skills"
 }
 
-$script:LogWriter = $null
-$script:LogMutex = $null
 # 本次运行探测到的可用代理，预检与 npx 阶段的子进程都要显式继承
 $script:ProxyUrl = $null
 
 function Write-LogLine {
     <#
     .SYNOPSIS
-        同时输出到终端与日志文件
+        同时输出到终端与共享按天日志
     #>
     param(
         [AllowEmptyString()][string]$Text = "",
@@ -107,21 +105,8 @@ function Write-LogLine {
     }
 
     Write-Host $line -ForegroundColor $Color
-    if ($null -ne $script:LogWriter) {
-        # 同一日期的多个分发实例共用日志；命名 Mutex 确保每行完整写入而不互相穿插
-        if ($null -ne $script:LogMutex) { [void]$script:LogMutex.WaitOne() }
-        try {
-            # 每个实例都有独立文件句柄，等待 Mutex 后必须重新定位到当前文件末尾，避免覆盖另一个实例刚写入的行
-            $script:LogWriter.Flush()
-            [void]$script:LogWriter.BaseStream.Seek(0, [System.IO.SeekOrigin]::End)
-            $script:LogWriter.WriteLine($line)
-            $script:LogWriter.Flush()
-        } catch {
-            Write-Host "警告：写入日志失败，本行仅输出到终端：$($_.Exception.Message)" -ForegroundColor Yellow
-        } finally {
-            if ($null -ne $script:LogMutex) { [void]$script:LogMutex.ReleaseMutex() }
-        }
-    }
+    # 终端保留颜色与缩进；日志交给公共库，与仓库内其他工具共用 logs/<yyyyMMdd>.log
+    Write-ToolkitLogLine -Text $line -Tool 'sync-skills'
 }
 
 function Test-RemoteSource {
@@ -541,166 +526,92 @@ if ($tasks.Count -eq 0) {
     exit 0
 }
 
-$logDir = Join-Path $toolkitRoot "logs"
-if (-not (Test-Path $logDir)) {
-    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+# 日志写入公共库的共享按天文件 logs/<yyyyMMdd>.log：
+# 路径由 Get-ToolkitLogFilePath 统一计算，BOM、并发追加与保留策略由 Write-ToolkitLogLine 统一处理
+$logFile = Get-ToolkitLogFilePath
+
+Write-LogLine ""
+Write-LogLine "=== Skills 分发（Scope: $Scope）===" -Color Cyan
+Write-LogLine "配置: $ConfigPath"
+Write-LogLine "日志: $logFile"
+Write-LogLine "任务: $($tasks.Count) 项，默认超时 ${timeoutSeconds} 秒（逐源可覆盖），重试 $retries 次，间隔 ${taskDelay} 秒"
+Write-LogLine "时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+
+# 远程源走 HTTPS，git 与 node 都不认系统代理，先注入环境变量供子进程继承
+$script:ProxyUrl = Set-ProxyEnvironment
+if ($script:ProxyUrl) {
+    Write-LogLine "代理: $($script:ProxyUrl)"
+} else {
+    Write-LogLine "代理: 未检测到可用代理，HTTPS 源将直连" -Color Yellow
 }
 
-# 日志按天记录：同一天多次运行追加到同一文件，只保留最近 10 个日志文件
-$logFile = Join-Path $logDir ("skills-" + (Get-Date -Format "yyyyMMdd") + ".log")
-Get-ChildItem -Path $logDir -Filter "skills-*.log" -File |
-    Sort-Object Name -Descending |
-    Select-Object -Skip 10 |
-    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
-
-# 日志带 UTF-8 BOM（无 BOM 时记事本/type 按 ANSI 解析会乱码）；
-# 以共享读写打开：两个 au 并行执行时（如上一轮分发尚未结束），各自追加同一份按天日志而不是报错退出
-$utf8Bom = [System.Text.UTF8Encoding]::new($true)
-$script:LogMutex = [System.Threading.Mutex]::new($false, "Local\AuSkillsLog-$(Get-Date -Format 'yyyyMMdd')")
-try {
-    # 串行化 BOM 探测 / 新建 / 追加初始化，避免两个首次启动实例同时写 BOM
-    try { [void]$script:LogMutex.WaitOne() } catch [System.Threading.AbandonedMutexException] { $null = $_ }
-    $exists = Test-Path -LiteralPath $logFile
-    $legacyNoBom = $false
-    if ($exists) {
-        # 共享读探测 BOM：另一实例可能正持着写句柄，默认独占的 OpenRead 会被拒
-        $probe = [System.IO.File]::Open($logFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        try {
-            $b1 = $probe.ReadByte()
-            $b2 = $probe.ReadByte()
-            $b3 = $probe.ReadByte()
-        } finally {
-            $probe.Dispose()
-        }
-        $legacyNoBom = -not ($b1 -eq 0xEF -and $b2 -eq 0xBB -and $b3 -eq 0xBF)
+# 执行前预检每个源：目录不存在或网址不可达时立刻报错，不等到 npx 阶段才卡住
+Write-LogLine ""
+Write-LogLine "=== 源可用性预检 ===" -Color Cyan
+$runnableTasks = [System.Collections.Generic.List[object]]::new()
+$preflightFailures = [System.Collections.Generic.List[object]]::new()
+foreach ($task in $tasks) {
+    # 项目目录不存在时任何源都无法安装，先于源检查报出
+    if (-not $task.IsGlobal -and -not (Test-Path -LiteralPath $task.BaseDirectory)) {
+        $reason = "项目目录不存在：$($task.BaseDirectory)"
+        Write-LogLine "✗ $($task.ProjectName) / $($task.Source)：$reason" -Color Red
+        $preflightFailures.Add((New-TaskResult -Task $task -Status 'fail' -Message "预检失败：$reason"))
+        continue
     }
 
-    # 打开被拒（另一实例以非共享方式持有等）时短暂重试，仍失败则降级为仅终端输出
-    $fileStream = $null
-    foreach ($attempt in 1..3) {
-        try {
-            $fileStream = [System.IO.File]::Open($logFile, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
-            break
-        } catch [System.IO.IOException] {
-            if ($attempt -lt 3) {
-                Write-ToolkitMessage -Kind Warning -Text "日志文件被其他分发进程占用，$attempt/3 次重试（等待 5 秒）..."
-                Start-Sleep -Seconds 5
-            } else {
-                Write-ToolkitMessage -Kind Warning -Text "警告：无法打开日志文件，本次运行不落盘：$($_.Exception.Message)"
-            }
-        }
-    }
-
-    if ($null -ne $fileStream) {
-        if (-not $exists) {
-            # 新建文件先写 BOM
-            $bom = $utf8Bom.GetPreamble()
-            $fileStream.Write($bom, 0, $bom.Length)
-        }
-        $script:LogWriter = [System.IO.StreamWriter]::new($fileStream, [System.Text.UTF8Encoding]::new($false))
-        $script:LogWriter.AutoFlush = $true
-        if ($legacyNoBom) {
-            Write-ToolkitMessage -Kind Warning -Text "提示：当日日志由旧版本脚本创建（无 BOM），本次为追加写入，中文在记事本中可能显示乱码"
-        }
-    }
-} catch {
-    Write-ToolkitMessage -Kind Warning -Text "警告：日志初始化失败，本次运行不落盘：$($_.Exception.Message)"
-    $script:LogWriter = $null
-} finally {
-    if ($null -ne $script:LogMutex) {
-        try { [void]$script:LogMutex.ReleaseMutex() } catch { $null = $_ }
-    }
-}
-
-try {
-    Write-LogLine ""
-    Write-LogLine "=== Skills 分发（Scope: $Scope）===" -Color Cyan
-    Write-LogLine "配置: $ConfigPath"
-    Write-LogLine "日志: $logFile"
-    Write-LogLine "任务: $($tasks.Count) 项，默认超时 ${timeoutSeconds} 秒（逐源可覆盖），重试 $retries 次，间隔 ${taskDelay} 秒"
-    Write-LogLine "时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-
-    # 远程源走 HTTPS，git 与 node 都不认系统代理，先注入环境变量供子进程继承
-    $script:ProxyUrl = Set-ProxyEnvironment
-    if ($script:ProxyUrl) {
-        Write-LogLine "代理: $($script:ProxyUrl)"
+    $check = Test-SourceAvailable -Source $task.Source -IsRemote $task.IsRemote
+    if ($check.Ok) {
+        $runnableTasks.Add($task)
     } else {
-        Write-LogLine "代理: 未检测到可用代理，HTTPS 源将直连" -Color Yellow
-    }
-
-    # 执行前预检每个源：目录不存在或网址不可达时立刻报错，不等到 npx 阶段才卡住
-    Write-LogLine ""
-    Write-LogLine "=== 源可用性预检 ===" -Color Cyan
-    $runnableTasks = [System.Collections.Generic.List[object]]::new()
-    $preflightFailures = [System.Collections.Generic.List[object]]::new()
-    foreach ($task in $tasks) {
-        # 项目目录不存在时任何源都无法安装，先于源检查报出
-        if (-not $task.IsGlobal -and -not (Test-Path -LiteralPath $task.BaseDirectory)) {
-            $reason = "项目目录不存在：$($task.BaseDirectory)"
-            Write-LogLine "✗ $($task.ProjectName) / $($task.Source)：$reason" -Color Red
-            $preflightFailures.Add((New-TaskResult -Task $task -Status 'fail' -Message "预检失败：$reason"))
-            continue
-        }
-
-        $check = Test-SourceAvailable -Source $task.Source -IsRemote $task.IsRemote
-        if ($check.Ok) {
-            $runnableTasks.Add($task)
-        } else {
-            Write-LogLine "✗ $($task.ProjectName) / $($task.Source)：$($check.Reason)" -Color Red
-            $preflightFailures.Add((New-TaskResult -Task $task -Status 'fail' -Message "预检失败：$($check.Reason)"))
-        }
-    }
-    Write-LogLine "可执行 $($runnableTasks.Count) 项，预检失败 $($preflightFailures.Count) 项"
-
-    $results = [System.Collections.Generic.List[object]]::new()
-    foreach ($failure in $preflightFailures) { $results.Add($failure) }
-    $roundStart = Get-Date
-
-    for ($i = 0; $i -lt $runnableTasks.Count; $i++) {
-        $results.Add((Invoke-SkillTask -Task $runnableTasks[$i] -Retries $retries -RetryDelaySeconds $retryDelay -Index ($i + 1) -Total $runnableTasks.Count))
-
-        # 任务间隔：留出时间让 npx / git 的临时文件与网络连接彻底释放
-        if ($i -lt ($runnableTasks.Count - 1) -and $taskDelay -gt 0) {
-            Write-LogLine "等待 ${taskDelay} 秒后继续..." -Color DarkGray -Indent 4
-            Start-Sleep -Seconds $taskDelay
-        }
-    }
-
-    $elapsed = [int]((Get-Date) - $roundStart).TotalSeconds
-    $successCount = @($results | Where-Object { $_.Success }).Count
-    $failCount = $results.Count - $successCount
-    $fallbackItems = @($results | Where-Object { $_.Status -eq "fallback" })
-
-    Write-LogLine ""
-    Write-LogLine "=========================================" -Color Cyan
-    Write-LogLine "Skills 分发结果" -Color Cyan
-    Write-LogLine "=========================================" -Color Cyan
-    Write-LogLine "总计: $($results.Count) 项"
-    Write-LogLine "成功: $successCount 项" -Color Green
-
-    if ($fallbackItems.Count -gt 0) {
-        Write-LogLine "其中 Junction 降级: $($fallbackItems.Count) 项" -Color Yellow
-        foreach ($item in $fallbackItems) {
-            Write-LogLine "  - $($item.ProjectName) / $($item.Source)" -Color Yellow
-        }
-    }
-
-    if ($failCount -gt 0) {
-        Write-LogLine "失败: $failCount 项" -Color Red
-        foreach ($item in @($results | Where-Object { -not $_.Success })) {
-            Write-LogLine "  - $($item.ProjectName) / $($item.Source)：$($item.Message)" -Color Red
-        }
-    }
-
-    Write-LogLine "耗时: $([int]($elapsed / 60)) 分 $($elapsed % 60) 秒"
-    Write-LogLine "日志: $logFile"
-
-    if ($failCount -gt 0) { exit 1 } else { exit 0 }
-} finally {
-    if ($null -ne $script:LogWriter) {
-        $script:LogWriter.Dispose()
-        $script:LogWriter = $null
+        Write-LogLine "✗ $($task.ProjectName) / $($task.Source)：$($check.Reason)" -Color Red
+        $preflightFailures.Add((New-TaskResult -Task $task -Status 'fail' -Message "预检失败：$($check.Reason)"))
     }
 }
+Write-LogLine "可执行 $($runnableTasks.Count) 项，预检失败 $($preflightFailures.Count) 项"
+
+$results = [System.Collections.Generic.List[object]]::new()
+foreach ($failure in $preflightFailures) { $results.Add($failure) }
+$roundStart = Get-Date
+
+for ($i = 0; $i -lt $runnableTasks.Count; $i++) {
+    $results.Add((Invoke-SkillTask -Task $runnableTasks[$i] -Retries $retries -RetryDelaySeconds $retryDelay -Index ($i + 1) -Total $runnableTasks.Count))
+
+    # 任务间隔：留出时间让 npx / git 的临时文件与网络连接彻底释放
+    if ($i -lt ($runnableTasks.Count - 1) -and $taskDelay -gt 0) {
+        Write-LogLine "等待 ${taskDelay} 秒后继续..." -Color DarkGray -Indent 4
+        Start-Sleep -Seconds $taskDelay
+    }
+}
+
+$elapsed = [int]((Get-Date) - $roundStart).TotalSeconds
+$successCount = @($results | Where-Object { $_.Success }).Count
+$failCount = $results.Count - $successCount
+$fallbackItems = @($results | Where-Object { $_.Status -eq "fallback" })
+
+Write-LogLine ""
+Write-LogLine "=========================================" -Color Cyan
+Write-LogLine "Skills 分发结果" -Color Cyan
+Write-LogLine "=========================================" -Color Cyan
+Write-LogLine "总计: $($results.Count) 项"
+Write-LogLine "成功: $successCount 项" -Color Green
+
+if ($fallbackItems.Count -gt 0) {
+    Write-LogLine "其中 Junction 降级: $($fallbackItems.Count) 项" -Color Yellow
+    foreach ($item in $fallbackItems) {
+        Write-LogLine "  - $($item.ProjectName) / $($item.Source)" -Color Yellow
+    }
+}
+
+if ($failCount -gt 0) {
+    Write-LogLine "失败: $failCount 项" -Color Red
+    foreach ($item in @($results | Where-Object { -not $_.Success })) {
+        Write-LogLine "  - $($item.ProjectName) / $($item.Source)：$($item.Message)" -Color Red
+    }
+}
+
+Write-LogLine "耗时: $([int]($elapsed / 60)) 分 $($elapsed % 60) 秒"
+Write-LogLine "日志: $logFile"
+
+if ($failCount -gt 0) { exit 1 } else { exit 0 }
 
 #endregion

@@ -5,6 +5,8 @@
 $script:ToolkitRoot = Split-Path -Parent $PSScriptRoot
 # 显式初始化模块级缓存，避免调用方启用 StrictMode 时首次读取未定义变量报错
 $script:ConfigCache = $null
+# 共享日志清理频控：记录最近一次执行清理的 yyyyMMdd，每个进程每天只清理一次
+$script:ToolkitLogCleanupDay = $null
 
 Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -File | Sort-Object Name | ForEach-Object {
     . $_.FullName

@@ -1,0 +1,110 @@
+{
+  // as 启动配置示例：复制本文件并改名为 as.config.jsonc 后修改即可使用。
+  // 命名配置保存为 as-<名称>.config.jsonc（如 as-shopee.config.jsonc），
+  // 用 as -c as-shopee 选择；一次运行只使用一份启动配置。
+  // -c 的三种写法均可：as-shopee、as-shopee.config、as-shopee.config.jsonc；
+  // 也支持完整路径或相对路径（相对路径相对 cli-tools 目录解析）。
+  // 真实配置 *.config.jsonc 已被仓库 .gitignore 排除，不入库。
+  //
+  // 顶层字段：
+  //   delayMs  相邻启动项之间的默认间隔（毫秒，默认 1000）
+  //   items    启动清单，按数组顺序依次执行
+  //
+  // 启动项公共可选字段：
+  //   topMost  全部启动项执行完成后，把该窗口切到前台一次；仅 app 与 vscode 有效，
+  //            url/folder/command/sleep 配 topMost 会警告并忽略；
+  //            名称启动命中 UWP 时无法推导进程名，置顶阶段警告并跳过
+  // 启动项上的 delayMs 已移除，出现时只警告并忽略，间隔一律使用顶层 delayMs。
+  //
+  // 启动项类型：
+  //   app      name（名称启动：开始菜单快捷方式或商店应用名称）或 path（路径启动：.exe/.lnk 路径），
+  //            二者互斥；name 精确匹配优先、子串兜底，多候选时该项失败；
+  //            命中 UWP 时用 explorer.exe 启动 shell:AppsFolder\<AppID>，不等待窗口、不参与置顶
+  //   url      urls：单个网址字符串或网址数组；数组会一次性交给默认浏览器，
+  //            在同一窗口以多标签打开
+  //   folder   path：用资源管理器打开目录
+  //   command  command：命令文本；可选 cwd（工作目录）、newTab（独立标签，默认 false）、
+  //            keepOpen（命令结束后保留终端，默认 true）
+  //   vscode   path（项目目录或文件）或 name（从 VS Code 最近打开目录匹配），二者互斥；
+  //            name 精确匹配优先、子串兜底，无命中或多候选时该项失败
+  //   sleep    ms：显式等待毫秒数（正整数）
+  //
+  // 间隔规则：普通启动项之间一律等待顶层 delayMs；
+  // 休眠项替代它与相邻启动项之间的默认间隔，不叠加（sleep 3000 就是准确等待 3000 毫秒）。
+  // 标签组：未标记 newTab 的命令按配置顺序并入同一个终端标签（默认终端不支持标签时
+  //   改为同一新窗口），由同一个 pwsh 会话顺序执行；不同 cwd 自动切换目录。
+  //   newTab: true 的命令各自独占一个标签/窗口；组内任一项 keepOpen 为 true 即保留终端，
+  //   全部为 false 时命令结束后关闭。
+  // 路径值支持 %VAR% 环境变量；相对路径相对启动配置所在目录解析（默认与命名配置都在
+  // cli-tools，因此通常即相对 cli-tools）。
+  // 置顶只做一次性切到前台，不改变窗口的永久层级（不是总在最前）。
+  // 未知字段只警告并忽略；未知类型或缺少必填字段的那一项记为失败并跳过，其余项继续执行。
+  "delayMs": 1000,
+  "items": [
+    {
+      // 休眠项：清单开头的显式等待，替代与下一项之间的默认间隔
+      "type": "sleep",
+      "ms": 2000
+    },
+    {
+      // 名称启动：使用开始菜单快捷方式或商店应用名称；示例用 Windows 自带的记事本
+      "type": "app",
+      "name": "Notepad",
+      // 执行完成后把记事本窗口切到前台一次
+      "topMost": true
+    },
+    {
+      // 路径启动：支持完整路径与 %VAR%；示例用 Windows 自带的记事本可执行文件
+      "type": "app",
+      "path": "%WINDIR%\\System32\\notepad.exe"
+    },
+    {
+      // 单个网址：交给系统默认浏览器打开
+      "type": "url",
+      "urls": "https://example.com"
+    },
+    {
+      // 网址数组：一次性交给默认浏览器，同一窗口多标签打开
+      "type": "url",
+      "urls": [
+        "https://example.com/a",
+        "https://example.com/b"
+      ]
+    },
+    {
+      // 文件夹：用资源管理器打开（示例占位，改为你的目录）
+      "type": "folder",
+      "path": "%USERPROFILE%\\projects\\demo"
+    },
+    {
+      // 命令：默认标签组；未标记 newTab 的命令都并入同一标签，按顺序执行
+      "type": "command",
+      "command": "git status",
+      "cwd": "%USERPROFILE%\\projects\\demo"
+    },
+    {
+      // 命令：独立标签（newTab: true），执行完关闭终端（keepOpen: false）
+      "type": "command",
+      "command": "npm run dev",
+      "cwd": "%USERPROFILE%\\projects\\demo",
+      "newTab": true,
+      "keepOpen": false
+    },
+    {
+      // 命令：并入上面的默认标签组；不写 keepOpen 时默认 true（保留终端）
+      "type": "command",
+      "command": "Write-Output 'ready'"
+    },
+    {
+      // VS Code：路径写法（项目目录或文件；示例占位，改为你的目录）
+      "type": "vscode",
+      "path": "%USERPROFILE%\\projects\\demo",
+      "topMost": true
+    },
+    {
+      // VS Code：名称写法，从最近打开目录按目录名匹配（示例占位，改为你的项目名）
+      "type": "vscode",
+      "name": "demo"
+    }
+  ]
+}

@@ -19,6 +19,8 @@
 | `Process.ps1` | 子进程、超时、外部命令检测 |
 | `Proxy.ps1` | 代理探测与环境变量注入 |
 | `File.ps1` | 唯一文件名、JSON 读写 |
+| `Log.ps1` | 共享按天日志文件写入 |
+| `VsCode.ps1` | VS Code 最近打开目录读取 |
 | `Admin.ps1` | 管理员身份检测、UAC 提权重启 |
 | `Environment.ps1` | 环境变量与 PATH 维护、目录变量转换、JDK/SQLcl 路径探测 |
 | `bin/` | 以独立进程方式调用的入口 |

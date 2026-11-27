@@ -1,6 +1,6 @@
 @{
     RootModule        = 'Toolkit.psm1'
-    ModuleVersion     = '1.12.0'
+    ModuleVersion     = '1.16.1'
     GUID              = 'bdd5cca1-7198-44bb-b0d5-41f864674d01'
     Author            = 'SUNC'
     Description       = 'toolkit 公共库：路径、配置、输出、帮助、进程、代理与文件工具'
@@ -28,7 +28,9 @@
         'Get-ToolkitHelp'
         'Invoke-ChildProcess'
         'Invoke-WithTimeout'
+        'Wait-ToolkitWindowHandle'
         'Start-ToolkitGuiProcess'
+        'Set-ToolkitForegroundWindow'
         'Test-ExternalCommand'
         'Test-TcpEndpoint'
         'Get-UsableProxyUrl'
@@ -36,6 +38,8 @@
         'Get-UniqueFileName'
         'Read-ToolkitJson'
         'Write-ToolkitJson'
+        'Write-ToolkitLogLine'
+        'Get-ToolkitLogFilePath'
         'Test-ToolkitAdministrator'
         'Invoke-ToolkitElevation'
         'Convert-ToolkitPathToEnvVar'
@@ -44,6 +48,7 @@
         'Send-ToolkitEnvironmentChange'
         'Get-ToolkitJdkHome'
         'Get-ToolkitSqlclHome'
+        'Get-ToolkitVsCodeRecentFolder'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()
