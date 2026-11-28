@@ -55,6 +55,7 @@ skills-lock.json
 .notes/
 TODO.md
 PERSONAL_NOTES.md
+/CONTEXT.md
 
 # 缓存和锁文件
 .cache/
