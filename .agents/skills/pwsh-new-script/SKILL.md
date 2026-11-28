@@ -21,6 +21,8 @@ description: 在本仓库新增一个 PowerShell 脚本，按仓库约定选择�
 
 ## 模板骨架
 
+`Author` 按全局署名约定填写实际作者，不写死固定人名。
+
 ```powershell
 <#
 .SYNOPSIS
@@ -34,7 +36,7 @@ description: 在本仓库新增一个 PowerShell 脚本，按仓库约定选择�
     <工具名>
     示例说明
 .NOTES
-    Author: SUNC
+    Author: <作者署名>
     Version: 1.0.0
 #>
 

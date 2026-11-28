@@ -22,7 +22,7 @@
 ## 脚本编写约定（新增与修改均适用）
 
 1. **定归属**：一次性/交互式工具放 `cli-tools/`；周期性维护放 `maintenance/`；新机初始化放 `system-init/`。需要分类时在 `cli-tools/` 下建子目录，`util` 显示为 `分类/工具名`。
-2. **写文件头**：中文 `.SYNOPSIS` / `.DESCRIPTION` / `.PARAMETER` / `.EXAMPLE` / `.NOTES`；`.NOTES` 固定 `Author: SUNC`、`Version: x.y.z`。修改脚本时同步维护对应字段。`.SYNOPSIS` 缺失或格式不符会让 `util` 清单简介空白。
+2. **写文件头**：中文 `.SYNOPSIS` / `.DESCRIPTION` / `.PARAMETER` / `.EXAMPLE` / `.NOTES`；`.NOTES` 含 `Author: <作者署名>`（按全局署名约定填写，不写死具体人名）与 `Version: x.y.z`。修改脚本时同步维护对应字段。`.SYNOPSIS` 缺失或格式不符会让 `util` 清单简介空白。
 3. **统一帮助**：开关为 `[Alias("h")] [switch]$Help`；新工具用 `Show-ToolkitHelp`；仍以 Comment-Based Help 描述帮助的脚本，`-h` 调 `Show-ToolkitScriptHelp`；禁止硬编码帮助版式。
 4. **配置分层**：跨脚本值走 `Get-ToolkitConfig`；工具专属配置与运行时状态按「配置与路径」处理。
 5. **中文与依赖**：面向用户的输出与代码注释用中文；外部依赖优先用 `Test-ExternalCommand` 检测，缺失时中文提示并 `exit 1`，不要静默失败。
